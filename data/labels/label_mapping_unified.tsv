@@ -1,0 +1,28 @@
+type	preferred_label	identity_only_evidence	labels_Marijke	labels_Marijn	labels_Rik	labels_Yeqian
+many-to-many (unresolved agreement issue)	Testimonial labour (Qualification & Employment Proof)	False	Testimonial education (Qualification & Employment Proof); Testimonial labour (Qualification & Employment Proof)	Testimonial education (Qualification & Employment Proof); Testimonial labour (Qualification & Employment Proof)	Letter Reference (Qualification & Employment Proof); Letter testimonial (Qualification & Employment Proof)	Testimonial education (Qualification & Employment Proof); Testimonial labour (Qualification & Employment Proof)
+1-to-1	Approval notice	False	Approval notice	Approval notice	approval notice	Approval notice
+1-to-1	Checksheet Form No. 47	False	Checksheet Form No. 47	Checksheet Form No. 47	Checksheet Form No. 47	Checksheet Form No. 47
+1-to-1	Checksheet Form No. XS 1	True	Checksheet Form No. XS 1	Checksheet Form No. XS 1	Checksheet Form No. XS 1	Checksheet Form No. XS 1
+partial-1-to-1	Consent parental	True	Consent parental	Consent parental		
+1-to-many (Rik subdivides)	D.1	False	D.1	D.1	D1 (predecessor model 56); Form D1 NAMA emigration application	D.1
+1-to-many (Rik subdivides)	D.2	False	D.2	D.2	Form D2 1951 version; Form D2 education and employment information  	D.2
+1-to-1	DM.1	False	DM.1	DM.1	Medical Examination. Ref. No.: DM1	DM.1
+partial-1-to-1	Emigratierapport	True	Emigratierapport	Emigratierapport		
+1-to-1	Form No. 40	False	Form No. 40	Form No. 40	Admission of Reletive/Friend	Form No. 40
+partial-1-to-1	Form No. 47	True	Form No. 47		Form No. 47	
+1-to-1	Form No. 47a	False	Form No. 47a	Form No. 47a	Form No. 47A	Form No. 47a
+1-to-1	Form X.S.1	True	Form X.S.1	Form X.S.1	Form X.S.1	Form X.S.1
+1-to-1	Form X.S.2	True	Form X.S.2	Form X.S.2	Form X.S.2	Form X.S.2
+1-to-1	Judicial and political background check	False	Judicial and political background check	Judicial and political background check	declaration security	Judicial and political background check
+1-to-many (Rik subdivides)	Letter about procedure (Other)	False	Letter about procedure (Other)	Letter about procedure (Other)	Letter Administrative (Administrative & Internal Processing Documents); Letter Administrative (Other); Letter Refusal (Other)	Letter (Other)
+partial-1-to-1	Model 202 (röntgen form)	True	Model 202 (röntgen form)	Model 202 (röntgen form)		Model 202 (röntgen form)
+1-to-1	NAA cover	False	NAA cover	NAA cover	Cover Page NAA	NAA cover
+1-to-1	NAMA agreement	False	NAMA agreement	NAMA agreement	Passage Agreement	NAMA agreement
+1-to-1	Other	False	Other	Other	Other	Other
+1-to-1	Photo	False	Photo	Photo	Photo	Photo
+1-to-1	Registration card	False	Registration card	Registration card	Registration Card AA	Registration card
+1-to-many (Rik subdivides)	Report of selection and medical officers	False	Report of selection and medical officers	Report of selection and medical officers	Report Medical Officer; Report Selection Officer	Report of selection and medical officers
+1-to-1	Testimonial status (Application Documents)	False	Testimonial birth/death (Application Documents)	Testimonial status (Application Documents)	Letter testimonial (Application Documents)	Birth certificate
+1-to-1	Testimonial medical form (Medical & Health Documents)	False	Testimonial medical form (Medical & Health Documents)	Testimonial medical form (Medical & Health Documents)	declaration röntgenologist	Testimonial medical form (Medical & Health Documents)
+1-to-1	Testimonial medical letter (Medical & Health Documents)	False	Testimonial medical letter (Medical & Health Documents)	Testimonial medical letter (Medical & Health Documents)	Letter Medical (Medical & Health Documents)	Testimonial medical letter (Medical & Health Documents)
+partial-1-to-1	Checksheet Form D 1	True			Checksheet Form D 1	Checksheet Form D 1

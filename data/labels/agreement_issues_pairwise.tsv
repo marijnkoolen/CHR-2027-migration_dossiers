@@ -1,0 +1,4 @@
+annotator_1	annotator_2	labels_Marijke	labels_Rik	labels_Marijn	labels_Yeqian
+Marijke	Rik	Testimonial education (Qualification & Employment Proof); Testimonial labour (Qualification & Employment Proof)	Letter Reference (Qualification & Employment Proof); Letter testimonial (Qualification & Employment Proof)		
+Marijn	Rik		Letter Reference (Qualification & Employment Proof); Letter testimonial (Qualification & Employment Proof)	Testimonial education (Qualification & Employment Proof); Testimonial labour (Qualification & Employment Proof)	
+Rik	Yeqian		Letter Reference (Qualification & Employment Proof); Letter testimonial (Qualification & Employment Proof)		Testimonial education (Qualification & Employment Proof); Testimonial labour (Qualification & Employment Proof)

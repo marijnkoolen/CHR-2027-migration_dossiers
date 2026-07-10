@@ -1,0 +1,118 @@
+annotator_1	annotator_2	type	labels_Marijke	labels_Marijn	labels_Rik	labels_Yeqian
+Marijke	Marijn	1-to-1	Approval notice	Approval notice		
+Marijke	Marijn	1-to-1	Checksheet Form No. 47	Checksheet Form No. 47		
+Marijke	Marijn	1-to-1	D.1	D.1		
+Marijke	Marijn	1-to-1	D.2	D.2		
+Marijke	Marijn	1-to-1	DM.1	DM.1		
+Marijke	Marijn	1-to-1	Form No. 40	Form No. 40		
+Marijke	Marijn	1-to-1	Form No. 47a	Form No. 47a		
+Marijke	Marijn	1-to-1	Judicial and political background check	Judicial and political background check		
+Marijke	Marijn	1-to-1	Letter about procedure (Other)	Letter about procedure (Other)		
+Marijke	Marijn	1-to-1	NAA cover	NAA cover		
+Marijke	Marijn	1-to-1	NAMA agreement	NAMA agreement		
+Marijke	Marijn	1-to-1	Other	Other		
+Marijke	Marijn	1-to-1	Photo	Photo		
+Marijke	Marijn	1-to-1	Registration card	Registration card		
+Marijke	Marijn	1-to-1	Report of selection and medical officers	Report of selection and medical officers		
+Marijke	Marijn	1-to-1	Testimonial birth/death (Application Documents)	Testimonial status (Application Documents)		
+Marijke	Marijn	1-to-1	Testimonial education (Qualification & Employment Proof)	Testimonial education (Qualification & Employment Proof)		
+Marijke	Marijn	1-to-1	Testimonial labour (Qualification & Employment Proof)	Testimonial labour (Qualification & Employment Proof)		
+Marijke	Marijn	1-to-1	Testimonial medical form (Medical & Health Documents)	Testimonial medical form (Medical & Health Documents)		
+Marijke	Marijn	1-to-1	Testimonial medical letter (Medical & Health Documents)	Testimonial medical letter (Medical & Health Documents)		
+Marijke	Rik	many-to-many	Testimonial education (Qualification & Employment Proof); Testimonial labour (Qualification & Employment Proof)		Letter Reference (Qualification & Employment Proof); Letter testimonial (Qualification & Employment Proof)	
+Marijke	Rik	1-to-1	Approval notice		approval notice	
+Marijke	Rik	1-to-1	Checksheet Form No. 47		Checksheet Form No. 47	
+Marijke	Rik	1-to-many	D.1		D1 (predecessor model 56); Form D1 NAMA emigration application	
+Marijke	Rik	1-to-many	D.2		Form D2 1951 version; Form D2 education and employment information  	
+Marijke	Rik	1-to-1	DM.1		Medical Examination. Ref. No.: DM1	
+Marijke	Rik	1-to-1	Form No. 40		Admission of Reletive/Friend	
+Marijke	Rik	1-to-1	Form No. 47a		Form No. 47A	
+Marijke	Rik	1-to-1	Judicial and political background check		declaration security	
+Marijke	Rik	1-to-many	Letter about procedure (Other)		Letter Administrative (Administrative & Internal Processing Documents); Letter Administrative (Other); Letter Refusal (Other)	
+Marijke	Rik	1-to-1	NAA cover		Cover Page NAA	
+Marijke	Rik	1-to-1	NAMA agreement		Passage Agreement	
+Marijke	Rik	1-to-1	Other		Other	
+Marijke	Rik	1-to-1	Photo		Photo	
+Marijke	Rik	1-to-1	Registration card		Registration Card AA	
+Marijke	Rik	1-to-many	Report of selection and medical officers		Report Medical Officer; Report Selection Officer	
+Marijke	Rik	1-to-1	Testimonial birth/death (Application Documents)		Letter testimonial (Application Documents)	
+Marijke	Rik	1-to-1	Testimonial medical form (Medical & Health Documents)		declaration röntgenologist	
+Marijke	Rik	1-to-1	Testimonial medical letter (Medical & Health Documents)		Letter Medical (Medical & Health Documents)	
+Marijke	Yeqian	1-to-1	Approval notice			Approval notice
+Marijke	Yeqian	1-to-1	Checksheet Form No. 47			Checksheet Form No. 47
+Marijke	Yeqian	1-to-1	D.1			D.1
+Marijke	Yeqian	1-to-1	D.2			D.2
+Marijke	Yeqian	1-to-1	DM.1			DM.1
+Marijke	Yeqian	1-to-1	Form No. 40			Form No. 40
+Marijke	Yeqian	1-to-1	Form No. 47a			Form No. 47a
+Marijke	Yeqian	1-to-1	Judicial and political background check			Judicial and political background check
+Marijke	Yeqian	1-to-1	Letter about procedure (Other)			Letter (Other)
+Marijke	Yeqian	1-to-1	NAA cover			NAA cover
+Marijke	Yeqian	1-to-1	NAMA agreement			NAMA agreement
+Marijke	Yeqian	1-to-1	Other			Other
+Marijke	Yeqian	1-to-1	Photo			Photo
+Marijke	Yeqian	1-to-1	Registration card			Registration card
+Marijke	Yeqian	1-to-1	Report of selection and medical officers			Report of selection and medical officers
+Marijke	Yeqian	1-to-1	Testimonial birth/death (Application Documents)			Birth certificate
+Marijke	Yeqian	1-to-1	Testimonial education (Qualification & Employment Proof)			Testimonial education (Qualification & Employment Proof)
+Marijke	Yeqian	1-to-1	Testimonial labour (Qualification & Employment Proof)			Testimonial labour (Qualification & Employment Proof)
+Marijke	Yeqian	1-to-1	Testimonial medical form (Medical & Health Documents)			Testimonial medical form (Medical & Health Documents)
+Marijke	Yeqian	1-to-1	Testimonial medical letter (Medical & Health Documents)			Testimonial medical letter (Medical & Health Documents)
+Marijn	Rik	many-to-many		Testimonial education (Qualification & Employment Proof); Testimonial labour (Qualification & Employment Proof)	Letter Reference (Qualification & Employment Proof); Letter testimonial (Qualification & Employment Proof)	
+Marijn	Rik	1-to-1		Approval notice	approval notice	
+Marijn	Rik	1-to-1		Checksheet Form No. 47	Checksheet Form No. 47	
+Marijn	Rik	1-to-many		D.1	D1 (predecessor model 56); Form D1 NAMA emigration application	
+Marijn	Rik	1-to-many		D.2	Form D2 1951 version; Form D2 education and employment information  	
+Marijn	Rik	1-to-1		DM.1	Medical Examination. Ref. No.: DM1	
+Marijn	Rik	1-to-1		Form No. 40	Admission of Reletive/Friend	
+Marijn	Rik	1-to-1		Form No. 47a	Form No. 47A	
+Marijn	Rik	1-to-1		Judicial and political background check	declaration security	
+Marijn	Rik	1-to-many		Letter about procedure (Other)	Letter Administrative (Administrative & Internal Processing Documents); Letter Administrative (Other); Letter Refusal (Other)	
+Marijn	Rik	1-to-1		NAA cover	Cover Page NAA	
+Marijn	Rik	1-to-1		NAMA agreement	Passage Agreement	
+Marijn	Rik	1-to-1		Other	Other	
+Marijn	Rik	1-to-1		Photo	Photo	
+Marijn	Rik	1-to-1		Registration card	Registration Card AA	
+Marijn	Rik	1-to-many		Report of selection and medical officers	Report Medical Officer; Report Selection Officer	
+Marijn	Rik	1-to-1		Testimonial medical form (Medical & Health Documents)	declaration röntgenologist	
+Marijn	Rik	1-to-1		Testimonial medical letter (Medical & Health Documents)	Letter Medical (Medical & Health Documents)	
+Marijn	Rik	1-to-1		Testimonial status (Application Documents)	Letter testimonial (Application Documents)	
+Marijn	Yeqian	1-to-1		Approval notice		Approval notice
+Marijn	Yeqian	1-to-1		Checksheet Form No. 47		Checksheet Form No. 47
+Marijn	Yeqian	1-to-1		D.1		D.1
+Marijn	Yeqian	1-to-1		D.2		D.2
+Marijn	Yeqian	1-to-1		DM.1		DM.1
+Marijn	Yeqian	1-to-1		Form No. 40		Form No. 40
+Marijn	Yeqian	1-to-1		Form No. 47a		Form No. 47a
+Marijn	Yeqian	1-to-1		Judicial and political background check		Judicial and political background check
+Marijn	Yeqian	1-to-1		Letter about procedure (Other)		Letter (Other)
+Marijn	Yeqian	1-to-1		NAA cover		NAA cover
+Marijn	Yeqian	1-to-1		NAMA agreement		NAMA agreement
+Marijn	Yeqian	1-to-1		Other		Other
+Marijn	Yeqian	1-to-1		Photo		Photo
+Marijn	Yeqian	1-to-1		Registration card		Registration card
+Marijn	Yeqian	1-to-1		Report of selection and medical officers		Report of selection and medical officers
+Marijn	Yeqian	1-to-1		Testimonial education (Qualification & Employment Proof)		Testimonial education (Qualification & Employment Proof)
+Marijn	Yeqian	1-to-1		Testimonial labour (Qualification & Employment Proof)		Testimonial labour (Qualification & Employment Proof)
+Marijn	Yeqian	1-to-1		Testimonial medical form (Medical & Health Documents)		Testimonial medical form (Medical & Health Documents)
+Marijn	Yeqian	1-to-1		Testimonial medical letter (Medical & Health Documents)		Testimonial medical letter (Medical & Health Documents)
+Marijn	Yeqian	1-to-1		Testimonial status (Application Documents)		Birth certificate
+Rik	Yeqian	many-to-many			Letter Reference (Qualification & Employment Proof); Letter testimonial (Qualification & Employment Proof)	Testimonial education (Qualification & Employment Proof); Testimonial labour (Qualification & Employment Proof)
+Rik	Yeqian	1-to-1			Admission of Reletive/Friend	Form No. 40
+Rik	Yeqian	1-to-1			Checksheet Form No. 47	Checksheet Form No. 47
+Rik	Yeqian	1-to-1			Cover Page NAA	NAA cover
+Rik	Yeqian	many-to-1			D1 (predecessor model 56); Form D1 NAMA emigration application	D.1
+Rik	Yeqian	many-to-1			Form D2 1951 version; Form D2 education and employment information  	D.2
+Rik	Yeqian	1-to-1			Form No. 47A	Form No. 47a
+Rik	Yeqian	many-to-1			Letter Administrative (Administrative & Internal Processing Documents); Letter Administrative (Other); Letter Refusal (Other)	Letter (Other)
+Rik	Yeqian	1-to-1			Letter Medical (Medical & Health Documents)	Testimonial medical letter (Medical & Health Documents)
+Rik	Yeqian	1-to-1			Letter testimonial (Application Documents)	Birth certificate
+Rik	Yeqian	1-to-1			Medical Examination. Ref. No.: DM1	DM.1
+Rik	Yeqian	1-to-1			Other	Other
+Rik	Yeqian	1-to-1			Passage Agreement	NAMA agreement
+Rik	Yeqian	1-to-1			Photo	Photo
+Rik	Yeqian	1-to-1			Registration Card AA	Registration card
+Rik	Yeqian	many-to-1			Report Medical Officer; Report Selection Officer	Report of selection and medical officers
+Rik	Yeqian	1-to-1			approval notice	Approval notice
+Rik	Yeqian	1-to-1			declaration röntgenologist	Testimonial medical form (Medical & Health Documents)
+Rik	Yeqian	1-to-1			declaration security	Judicial and political background check
