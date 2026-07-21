@@ -262,6 +262,22 @@ def train_page_model(model, train_loader, val_loader, test_loader, classes, devi
     (out_dir / "history.json").write_text(json.dumps(history, indent=2))
     (out_dir / "classes.json").write_text(json.dumps(classes, indent=2))
 
+    # Training-set evaluation: a clean pass (no augmentation, no weighted
+    # resampling - a fresh unshuffled loader over the same underlying
+    # samples) over the exact data being trained on. If this is also stuck
+    # at majority-class-only, the model can't even fit what it's training
+    # on - an optimization/capacity problem, not a generalization one.
+    original_transform = train_loader.dataset.transform
+    train_loader.dataset.transform = build_transforms(image_size, train=False)
+    train_eval_loader = DataLoader(
+        train_loader.dataset, batch_size=train_loader.batch_size, shuffle=False, collate_fn=train_loader.collate_fn
+    )
+    train_metrics = evaluate_page_model(model, train_eval_loader, device, classes, forward_fn, amp=amp)
+    train_loader.dataset.transform = original_transform
+    print(f"\ntrain-set (no augmentation) accuracy={train_metrics['accuracy']:.3f}  "
+          f"macro-F1={train_metrics['macro_f1']:.3f}")
+    (out_dir / "train_set_report.txt").write_text(train_metrics["report"])
+
     if test_loader is not None:
         if tta_views and tta_views > 1:
             metrics = evaluate_page_model_tta(
@@ -572,6 +588,26 @@ def run_sequence(args, targets: list[str]):
     }, indent=2))
 
     class_lists = {"doctype": doctype_classes, "layout": layout_classes, "functional": functional_classes}
+
+    # Training-set evaluation (self-predicted segmentation, same as the test
+    # metrics below - a fair comparison): a fresh, non-augmented pass over
+    # the exact PDFs being trained on. If this is also stuck at
+    # majority-class-only, the model can't fit its own training data - an
+    # optimization/capacity problem, not a generalization one.
+    train_eval_ds = make_dataset("train", train=False)
+    train_eval_loader = DataLoader(train_eval_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate)
+    train_metrics = evaluate_sequence(embedder, seq_model, train_eval_loader, device, classes=class_lists, amp=amp)
+    print("\ntrain-set (no augmentation) metrics:")
+    train_report_lines = ["train-set (no augmentation) metrics:", ""]
+    for key in ["start_precision", "start_recall", "start_f1", "doctype_accuracy", "doctype_macro_f1",
+                "layout_accuracy", "layout_macro_f1", "functional_accuracy", "functional_macro_f1"]:
+        print(f"  {key}: {train_metrics[key]:.3f}")
+        train_report_lines.append(f"{key}: {train_metrics[key]:.3f}")
+    for key in ("start_report", "doctype_report", "layout_report", "functional_report"):
+        if key in train_metrics:
+            train_report_lines.append(f"\n--- {key} ---\n{train_metrics[key]}")
+    (args.out_dir / "train_set_report.txt").write_text("\n".join(train_report_lines))
+
     test_metrics = evaluate_sequence(embedder, seq_model, test_loader, device, classes=class_lists, amp=amp)
 
     print(f"\ntest metrics (tracked targets: {', '.join(targets)}):")
