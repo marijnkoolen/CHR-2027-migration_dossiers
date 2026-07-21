@@ -1,0 +1,14 @@
+# Core training stack
+torch>=2.2
+torchvision>=0.17
+transformers>=4.40
+scikit-learn>=1.3
+pillow>=10.0
+numpy>=1.26
+pandas>=2.0
+
+# Only needed for the --model yolov8n-cls / yolov8s-cls path in train_efficient.py
+ultralytics>=8.1
+
+# Only needed for train_multimodal.py (XLM-RoBERTa's tokenizer)
+sentencepiece>=0.1.99

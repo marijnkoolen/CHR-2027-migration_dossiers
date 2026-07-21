@@ -34,6 +34,9 @@ from pathlib import Path
 import networkx as nx
 import pandas as pd
 
+from map_singletons import map_to_preferred
+
+
 ANNOTATION_FILES = {
     "Marijke": "annotations_Marijke.tsv.gz",
     "Marijn": "annotations_Marijn.tsv.gz",
@@ -420,6 +423,10 @@ def main():
 
     unmapped_df = pd.DataFrame(final_unmapped_rows)
     unmapped_df.to_csv(args.out_dir / "unmapped_labels.tsv", index=False, sep='\t')
+
+    unmapped_df['preferred_label'] = unmapped_df.label.apply(map_to_preferred)
+    unmapped_df.to_csv(args.out_dir / "mapped_single_annotator_labels.tsv", index=False, sep='\t')
+
 
     print(f"Wrote {args.out_dir / 'label_mappings_pairwise.tsv'}")
     print(f"Wrote {args.out_dir / 'agreement_issues_pairwise.tsv'}")

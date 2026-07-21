@@ -3,7 +3,7 @@ def map_to_preferred(label: str):
     if label.startswith('Letter about procedure'):
         return 'Letter about procedure'
     elif label.startswith('Letter testimonial') or label.startswith('Testimonial') or label.lower().startswith('consent') or label.lower().startswith('divorce'):
-        return 'Testmonial status (Application Documents)'
+        return 'Testimonial status (Application Documents)'
     elif label.lower().startswith('letter'):
         return 'Letter (Other)'
     elif 'proof' in label:

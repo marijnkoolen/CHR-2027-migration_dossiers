@@ -30,6 +30,7 @@ import argparse
 from collections import Counter
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 ANNOTATION_FILES = {
@@ -40,6 +41,7 @@ ANNOTATION_FILES = {
 }
 
 IMAGE_COL = "image path"
+IMAGE_NEW_COL = "dossier_name"
 PAGE_COL = "page number"
 DOCTYPE_COL = "Document type"
 LAYOUT_COL = "Layout Type Classification"
@@ -148,7 +150,7 @@ def merge(long_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     rows = []
     disagreement_rows = []
     for (image, page), group in long_df.groupby([IMAGE_COL, PAGE_COL], sort=False):
-        row = {IMAGE_COL: image, PAGE_COL: page, "n_annotators": len(group)}
+        row = {IMAGE_NEW_COL: image, PAGE_COL: page, "n_annotators": len(group)}
         has_disagreement = False
         for col in VOTED_COLUMNS:
             winner, status = vote(group[col].tolist(), freqs[col])
@@ -159,7 +161,7 @@ def merge(long_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
         rows.append(row)
 
         if has_disagreement and len(group) > 1:
-            detail = {IMAGE_COL: image, PAGE_COL: page}
+            detail = {IMAGE_NEW_COL: image, PAGE_COL: page}
             for _, r in group.iterrows():
                 for col in VOTED_COLUMNS:
                     detail[f"{r['annotator']}: {col}"] = r[col]
@@ -167,10 +169,32 @@ def merge(long_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
 
     merged_df = pd.DataFrame(rows)
     merged_df["_page_sort"] = pd.to_numeric(merged_df[PAGE_COL], errors="coerce")
-    merged_df = merged_df.sort_values([IMAGE_COL, "_page_sort"]).drop(columns="_page_sort")
+    merged_df = merged_df.sort_values([IMAGE_NEW_COL, "_page_sort"]).drop(columns="_page_sort")
 
     disagreement_df = pd.DataFrame(disagreement_rows)
     return merged_df, disagreement_df
+
+
+def add_splits(merged_df: pd.DataFrame, random_seed: int = 8963764) -> pd.DataFrame:
+    column_map = {
+        'Start page': 'is_start',
+        'page number': 'page_num',
+        'Document type': 'doc_type',
+        'Functional Categories': 'func_label',
+    }
+    merged_df = merged_df.rename(columns=column_map)
+    merged_df['dossier'] = merged_df.dossier_name.apply(lambda x: x.replace('.pmerged_df', ''))
+
+    merged_df['img_path'] = merged_df.apply(lambda row: img_path(row['dossier'], row['page_num']), axis=1)
+    merged_df['text_path'] = merged_df.apply(lambda row: text_path(row['dossier'], row['page_num']), axis=1)
+    train, validate, test = np.split(merged_df.sample(frac=1, random_state=random_seed), 
+                                 [int(.6*len(merged_df)), int(.8*len(merged_df))])
+    train['split'] = 'train'
+    validate['split'] = 'val'
+    test['split'] = 'test'
+    return pd.concat([train, validate, test])
+
+
 
 
 def main():
@@ -196,6 +220,8 @@ def main():
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     merged_df.to_csv(args.out_dir / "merged_annotations.tsv", index=False, sep="\t")
+    merged_split_df = add_splits(merged_df)
+    merged_split_df.to_csv(args.out_dir / "dossier_labels.tsv", sep="\t", index=False)
     disagreement_df.to_csv(args.out_dir / "merge_disagreements.tsv", index=False, sep="\t")
 
     print(f"Merged {len(merged_df)} pages from {sum(len(df) for df in dfs.values())} source rows "

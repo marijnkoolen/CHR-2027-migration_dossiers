@@ -2,12 +2,12 @@
 predict_functional_category.py
 ================================
 Train Late-Fusion (EfficientNet-B0 FT + BERT FT) on the 65 labeled dossiers
-from all_annotations.csv, then predict functional_category for every page
+from merged_annotations.tsv, then predict functional_category for every page
 in the remaining unlabeled dossiers.
 
 Inputs
 ------
-  data/annotations/all_annotations.csv    – labeled pages (training data)
+  data/annotations/merged_annotations.tsv    – labeled pages (training data)
   image-per-page/<dossier>/               – PNG images per page
   extract-text-per-page/<dossier>/page/   – PAGE-XML text files per page
 
@@ -41,9 +41,9 @@ warnings.filterwarnings("ignore")
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 WORKSPACE = Path(__file__).resolve().parent.parent
-IMG_ROOT  = WORKSPACE / "image-per-page"
-TEXT_ROOT = WORKSPACE / "extract-text-per-page"
-ANN_CSV   = WORKSPACE / "data" / "annotations" / "all_annotations.csv"
+IMG_ROOT  = WORKSPACE / "data" / "image-per-page"
+TEXT_ROOT = WORKSPACE / "data" / "text-per-page"
+ANN_CSV   = WORKSPACE / "data" / "labels" / "merged_annotations.tsv"
 OUT_DIR   = WORKSPACE / "data" / "predictions"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 MODEL_DIR = WORKSPACE / "data" / "models"
@@ -107,9 +107,14 @@ def txt_path(dossier_dir: str, page_num: int) -> Path:
 
 # ── Labeled data loader ────────────────────────────────────────────────────────
 def load_labeled_data() -> pd.DataFrame:
-    df = pd.read_csv(ANN_CSV)
-    df["dossier_dir"] = df["dossier"].str.replace(r"\.pdf$", "", regex=True)
-    df = df.rename(columns={"page_number": "page_num"})
+    df = pd.read_csv(ANN_CSV, sep='\t')
+    df["dossier_dir"] = df["dossier_name"].str.replace(r"\.pdf$", "", regex=True)
+    col_map = {
+        'page number': 'page_num',
+        'Document type': 'doc_type', 
+        'Functional Categories': 'functional_category',
+    }
+    df = df.rename(columns=col_map)
     df["page_num"] = pd.to_numeric(df["page_num"], errors="coerce")
     df = df.dropna(subset=["page_num", "functional_category"])
     df["page_num"] = df["page_num"].astype(int)
@@ -376,23 +381,31 @@ def main():
     print("\n" + "="*70)
     print("Step 3: Training EfficientNet-B0 (fine-tuned)")
     print("="*70)
+    
     tr_img_loader = DataLoader(
         PageImageDataset(tr_df["img_path"].tolist(), y_tr.tolist(), train_tfm),
         batch_size=IMG_BATCH, shuffle=True, num_workers=0,
     )
+    
     va_img_loader = DataLoader(
         PageImageDataset(va_df["img_path"].tolist(), y_va.tolist(), eval_tfm),
         batch_size=PRED_BATCH, shuffle=False, num_workers=0,
     )
+
+    eff_model_path = MODEL_DIR / "efficientnet_func_cat.pt"
     eff_model = build_efficientnet()
-    trainable = sum(p.numel() for p in eff_model.parameters() if p.requires_grad)
-    print(f"  Trainable params: {trainable:,}")
-    eff_model = train_image_model(
-        eff_model, tr_img_loader, va_img_loader, y_tr, y_va, n_epochs=15
-    )
-    torch.save(eff_model.state_dict(), MODEL_DIR / "efficientnet_func_cat.pt")
+    if eff_model_path.exists():
+        eff_model.load_state_dict(torch.load(eff_model_path))
+    else:
+        trainable = sum(p.numel() for p in eff_model.parameters() if p.requires_grad)
+        print(f"  Trainable params: {trainable:,}")
+        eff_model = train_image_model(
+            eff_model, tr_img_loader, va_img_loader, y_tr, y_va, n_epochs=15
+        )
+        torch.save(eff_model.state_dict(), MODEL_DIR / "efficientnet_func_cat.pt")
 
     # 5. Train BERT fine-tuned
+    bert_clf_path = MODEL_DIR / "bert_func_cat.pt"
     print("\n" + "="*70)
     print("Step 4: Training BERT (fine-tuned)")
     print("="*70)
@@ -407,11 +420,14 @@ def main():
     va_text_loader = DataLoader(va_text_ds, batch_size=16,         shuffle=False, num_workers=0)
 
     bert_clf = BERTClassifier().to(DEVICE)
-    print(f"  Total params: {sum(p.numel() for p in bert_clf.parameters()):,}")
-    bert_clf = train_bert_model(
-        bert_clf, tr_text_loader, va_text_loader, y_tr, y_va, n_epochs=10
-    )
-    torch.save(bert_clf.state_dict(), MODEL_DIR / "bert_func_cat.pt")
+    if bert_clf_path.exists():
+        bert_clf.load_state_dict(torch.load(bert_clf_path))
+    else:
+        print(f"  Total params: {sum(p.numel() for p in bert_clf.parameters()):,}")
+        bert_clf = train_bert_model(
+            bert_clf, tr_text_loader, va_text_loader, y_tr, y_va, n_epochs=10
+        )
+        torch.save(bert_clf.state_dict(), bert_clf_path)
 
     # 6. Predict unlabeled pages
     print("\n" + "="*70)

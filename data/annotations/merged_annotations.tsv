@@ -1,4 +1,4 @@
-dossier_name	page number	n_annotators	Document type	Document type_agreement	Layout Type Classification	Layout Type Classification_agreement	Functional Categories	Functional Categories_agreement	Start page	Start page_agreement
+image path	page number	n_annotators	Document type	Document type_agreement	Layout Type Classification	Layout Type Classification_agreement	Functional Categories	Functional Categories_agreement	Start page	Start page_agreement
 a2478-ambachtsheer-p-1214053.pdf	1	1	NAA cover	single	Cover	single	Other	single	yes	single
 a2478-ambachtsheer-p-1214053.pdf	2	1	Photo	single	Photo	single	Other	single	yes	single
 a2478-ambachtsheer-p-1214053.pdf	3	1	Photo	single	Photo	single	Other	single	no	single
@@ -24,7 +24,7 @@ a2478-antonis-a-1217151.pdf	11	1	Form X.S.1	single	Structured Form	single	Applic
 a2478-antonis-a-1217151.pdf	12	1	Form X.S.1	single	Structured Form	single	Application Documents	single	yes	single
 a2478-antonis-a-1217151.pdf	13	1	Form X.S.1	single	Structured Form	single	Application Documents	single	yes	single
 a2478-antonis-a-1217151.pdf	14	1	Testimonial labour (Qualification & Employment Proof)	single	Structured Form	single	Other	single	yes	single
-a2478-antonis-a-1217151.pdf	15	1	Testimonial status (Application Documents)	single	Letter	single	Other	single	yes	single
+a2478-antonis-a-1217151.pdf	15	1	Testmonial status (Application Documents)	single	Letter	single	Other	single	yes	single
 a2478-antonis-a-1217151.pdf	16	1	Form No. 63 (Rijksarbeidsbureau - Qualifications)	single	Structured Form	single	Application Documents	single	yes	single
 a2478-antonis-a-1217151.pdf	17	1	Form No. 63 (Rijksarbeidsbureau - Qualifications)	single	Structured Form	single	Application Documents	single	no	single
 a2478-antonis-a-1217151.pdf	18	1	Form No. 63 (Rijksarbeidsbureau - Qualifications)	single	Structured Form	single	Application Documents	single	no	single
@@ -74,7 +74,7 @@ a2478-asjes-w-1429968.pdf	14	1	NAMA agreement	single	Structured Form	single	Appl
 a2478-asjes-w-1429968.pdf	15	1	Registration card	single	Card (Index Card)	single	Administrative & Internal Processing Documents	single	yes	single
 a2478-asjes-w-1429968.pdf	16	1	Registration card	single	Card (Index Card)	single	Administrative & Internal Processing Documents	single	no	single
 a2478-asjes-w-1429968.pdf	17	1	D.2	single	Structured Form	single	Application Documents	single	yes	single
-a2478-asjes-w-1429968.pdf	18	1	Testimonial status (Application Documents)	single	Other	single	Other	single	yes	single
+a2478-asjes-w-1429968.pdf	18	1	Testmonial status (Application Documents)	single	Other	single	Other	single	yes	single
 a2478-asjes-w-1429968.pdf	19	1	Testimonial medical letter (Medical & Health Documents)	single	Letter	single	Medical & Health Documents	single	yes	single
 a2478-asjes-w-1429968.pdf	20	1	Testimonial medical letter (Medical & Health Documents)	single	Letter	single	Medical & Health Documents	single	yes	single
 a2478-asjes-w-1429968.pdf	21	1	Testimonial medical form (Medical & Health Documents)	single	Structured Form	single	Medical & Health Documents	single	yes	single
@@ -140,9 +140,9 @@ a2478-bakker-a-1451609.pdf	53	1	Emigratierapport	single	Structured Form	single	A
 a2478-bakker-a-1451609.pdf	54	1	Emigratierapport	single	Structured Form	single	Application Documents	single	no	single
 a2478-bakker-a-1451609.pdf	55	1	Letter about procedure (Other)	single	Letter	single	Other	single	no	single
 a2478-bakker-a-1451609.pdf	56	1	Testimonial labour (Qualification & Employment Proof)	single	Letter	single	Qualification & Employment Proof	single	yes	single
-a2478-bakker-a-1451609.pdf	57	1	Testimonial status (Application Documents)	single	Letter	single	Security & Political Screening Documents	single	yes	single
-a2478-bakker-a-1451609.pdf	58	1	Testimonial status (Application Documents)	single	Letter	single	Security & Political Screening Documents	single	yes	single
-a2478-bakker-a-1451609.pdf	59	1	Testimonial status (Application Documents)	single	Letter	single	Security & Political Screening Documents	single	yes	single
+a2478-bakker-a-1451609.pdf	57	1	Testmonial status (Application Documents)	single	Letter	single	Security & Political Screening Documents	single	yes	single
+a2478-bakker-a-1451609.pdf	58	1	Testmonial status (Application Documents)	single	Letter	single	Security & Political Screening Documents	single	yes	single
+a2478-bakker-a-1451609.pdf	59	1	Testmonial status (Application Documents)	single	Letter	single	Security & Political Screening Documents	single	yes	single
 a2478-bakker-a-1451609.pdf	60	1	Testimonial labour (Qualification & Employment Proof)	single	Letter	single	Qualification & Employment Proof	single	yes	single
 a2478-bakker-a-1451609.pdf	61	1	Testimonial labour (Qualification & Employment Proof)	single	Letter	single	Qualification & Employment Proof	single	yes	single
 a2478-bakker-a-1451609.pdf	62	1	Other	single	Structured Form	single	Application Documents	single	yes	single
@@ -932,7 +932,7 @@ a2478-de-leeuw-h-1476840.pdf	6	1	NAMA agreement	single	Structured Form	single	Ap
 a2478-de-leeuw-h-1476840.pdf	7	1	NAMA agreement	single	Structured Form	single	Application Documents	single	no	single
 a2478-de-leeuw-h-1476840.pdf	8	1	Letter about procedure (Other)	single	Other	single	Other	single	yes	single
 a2478-de-leeuw-h-1476840.pdf	9	1	Letter about procedure (Other)	single	Other	single	Other	single	yes	single
-a2478-de-leeuw-h-1476840.pdf	10	1	Testimonial status (Application Documents)	single	Other	single	Other	single	yes	single
+a2478-de-leeuw-h-1476840.pdf	10	1	Testmonial status (Application Documents)	single	Other	single	Other	single	yes	single
 a2478-de-leeuw-h-1476840.pdf	11	1	D.2	single	Structured Form	single	Application Documents	single	yes	single
 a2478-de-leeuw-h-1476840.pdf	12	1	NAMA agreement	single	Structured Form	single	Application Documents	single	yes	single
 a2478-de-leeuw-h-1476840.pdf	13	1	NAMA agreement	single	Structured Form	single	Application Documents	single	no	single
@@ -1027,7 +1027,7 @@ a2478-de-visser-a-p-1453395.pdf	12	1	Photo	single	Photo	single	Other	single	yes	
 a2478-de-visser-a-p-1453395.pdf	13	1	Photo	single	Photo	single	Other	single	yes	single
 a2478-de-visser-a-p-1453395.pdf	14	1	Photo	single	Photo	single	Other	single	yes	single
 a2478-de-visser-a-p-1453395.pdf	15	1	Letter about procedure (Other)	single	Other	single	Other	single	yes	single
-a2478-de-visser-a-p-1453395.pdf	16	1	Testimonial status (Application Documents)	single	Letter	single	Other	single	yes	single
+a2478-de-visser-a-p-1453395.pdf	16	1	Testmonial status (Application Documents)	single	Letter	single	Other	single	yes	single
 a2478-de-visser-a-p-1453395.pdf	17	1	Testimonial labour (Qualification & Employment Proof)	single	Letter	single	Qualification & Employment Proof	single	yes	single
 a2478-de-visser-a-p-1453395.pdf	18	1	Testimonial labour (Qualification & Employment Proof)	single	Letter	single	Qualification & Employment Proof	single	yes	single
 a2478-de-visser-a-p-1453395.pdf	19	1	Testimonial medical letter (Medical & Health Documents)	single	Letter	single	Medical & Health Documents	single	yes	single
@@ -1136,7 +1136,7 @@ a2478-den-brinker-p-a-v-1434784.pdf	13	1	Testimonial labour (Qualification & Emp
 a2478-den-brinker-p-a-v-1434784.pdf	14	1	Testimonial labour (Qualification & Employment Proof)	single	Other	single	Qualification & Employment Proof	single	yes	single
 a2478-den-brinker-p-a-v-1434784.pdf	15	1	Testimonial labour (Qualification & Employment Proof)	single	Other	single	Qualification & Employment Proof	single	yes	single
 a2478-den-brinker-p-a-v-1434784.pdf	16	1	Testimonial labour (Qualification & Employment Proof)	single	Other	single	Qualification & Employment Proof	single	yes	single
-a2478-den-brinker-p-a-v-1434784.pdf	17	1	Testimonial status (Application Documents)	single	Other	single	Other	single	yes	single
+a2478-den-brinker-p-a-v-1434784.pdf	17	1	Testmonial status (Application Documents)	single	Other	single	Other	single	yes	single
 a2478-den-brinker-p-a-v-1434784.pdf	18	1	Testimonial medical letter (Medical & Health Documents)	single	Letter	single	Medical & Health Documents	single	yes	single
 a2478-den-brinker-p-a-v-1434784.pdf	19	1	Testimonial medical form (Medical & Health Documents)	single	Structured Form	single	Medical & Health Documents	single	yes	single
 a2478-den-brinker-p-a-v-1434784.pdf	20	1	Letter about procedure (Other)	single	Letter	single	Other	single	yes	single
@@ -1404,8 +1404,8 @@ a2478-ermstrang-p-1445650.pdf	24	1	Judicial and political background check	singl
 a2478-ermstrang-p-1445650.pdf	25	1	D.2	single	Structured Form	single	Application Documents	single	yes	single
 a2478-ermstrang-p-1445650.pdf	26	1	D.2	single	Structured Form	single	Application Documents	single	no	single
 a2478-ermstrang-p-1445650.pdf	27	1	Testimonial status (Application Documents)	single	Letter	single	Application Documents	single	yes	single
-a2478-ermstrang-p-1445650.pdf	28	1	Testimonial status (Application Documents)	single	Letter	single	Application Documents	single	yes	single
-a2478-ermstrang-p-1445650.pdf	29	1	Testimonial status (Application Documents)	single	Letter	single	Application Documents	single	no	single
+a2478-ermstrang-p-1445650.pdf	28	1	Testmonial status (Application Documents)	single	Letter	single	Application Documents	single	yes	single
+a2478-ermstrang-p-1445650.pdf	29	1	Testmonial status (Application Documents)	single	Letter	single	Application Documents	single	no	single
 a2478-ermstrang-p-1445650.pdf	30	1	Testimonial labour (Qualification & Employment Proof)	single	Letter	single	Qualification & Employment Proof	single	yes	single
 a2478-ermstrang-p-1445650.pdf	31	1	Testimonial labour (Qualification & Employment Proof)	single	Letter	single	Qualification & Employment Proof	single	yes	single
 a2478-ermstrang-p-1445650.pdf	32	1	Testimonial labour (Qualification & Employment Proof)	single	Letter	single	Qualification & Employment Proof	single	yes	single
@@ -1435,10 +1435,10 @@ a2478-fielt-a-a-b-1212978.pdf	13	1	Approval notice	single	Structured Form	single
 a2478-fielt-a-a-b-1212978.pdf	14	1	Other	single	Other	single	Other	single	yes	single
 a2478-fielt-a-a-b-1212978.pdf	15	1	Letter about procedure (Other)	single	Letter	single	Other	single	yes	single
 a2478-fielt-a-a-b-1212978.pdf	16	1	Letter about procedure (Other)	single	Letter	single	Other	single	yes	single
-a2478-fielt-a-a-b-1212978.pdf	17	1	Testimonial status (Application Documents)	single	Letter	single	Application Documents	single	yes	single
-a2478-fielt-a-a-b-1212978.pdf	18	1	Testimonial status (Application Documents)	single	Letter	single	Application Documents	single	no	single
-a2478-fielt-a-a-b-1212978.pdf	19	1	Testimonial status (Application Documents)	single	Letter	single	Application Documents	single	yes	single
-a2478-fielt-a-a-b-1212978.pdf	20	1	Testimonial status (Application Documents)	single	Letter	single	Application Documents	single	no	single
+a2478-fielt-a-a-b-1212978.pdf	17	1	Testmonial status (Application Documents)	single	Letter	single	Application Documents	single	yes	single
+a2478-fielt-a-a-b-1212978.pdf	18	1	Testmonial status (Application Documents)	single	Letter	single	Application Documents	single	no	single
+a2478-fielt-a-a-b-1212978.pdf	19	1	Testmonial status (Application Documents)	single	Letter	single	Application Documents	single	yes	single
+a2478-fielt-a-a-b-1212978.pdf	20	1	Testmonial status (Application Documents)	single	Letter	single	Application Documents	single	no	single
 a2478-fielt-a-a-b-1212978.pdf	21	1	DM.1	single	Structured Form	single	Medical & Health Documents	single	yes	single
 a2478-fielt-a-a-b-1212978.pdf	22	1	DM.1	single	Structured Form	single	Medical & Health Documents	single	no	single
 a2478-fielt-a-a-b-1212978.pdf	23	1	DM.1	single	Structured Form	single	Medical & Health Documents	single	yes	single
@@ -1666,9 +1666,9 @@ a2478-harberink-g-a-1440688.pdf	53	1	D.2	single	Structured Form	single	Applicati
 a2478-harberink-g-a-1440688.pdf	54	1	D.2	single	Structured Form	single	Application Documents	single	yes	single
 a2478-harberink-g-a-1440688.pdf	55	1	D.2	single	Structured Form	single	Application Documents	single	no	single
 a2478-harberink-g-a-1440688.pdf	56	1	D.2	single	Structured Form	single	Application Documents	single	yes	single
-a2478-harberink-g-a-1440688.pdf	57	1	Testimonial status (Application Documents)	single	Letter	single	Application Documents	single	yes	single
-a2478-harberink-g-a-1440688.pdf	58	1	Testimonial status (Application Documents)	single	Letter	single	Application Documents	single	no	single
-a2478-harberink-g-a-1440688.pdf	59	1	Testimonial status (Application Documents)	single	Letter	single	Application Documents	single	no	single
+a2478-harberink-g-a-1440688.pdf	57	1	Testmonial status (Application Documents)	single	Letter	single	Application Documents	single	yes	single
+a2478-harberink-g-a-1440688.pdf	58	1	Testmonial status (Application Documents)	single	Letter	single	Application Documents	single	no	single
+a2478-harberink-g-a-1440688.pdf	59	1	Testmonial status (Application Documents)	single	Letter	single	Application Documents	single	no	single
 a2478-harberink-g-a-1440688.pdf	60	1	Testimonial labour (Qualification & Employment Proof)	single	Letter	single	Qualification & Employment Proof	single	yes	single
 a2478-harberink-g-a-1440688.pdf	61	1	Testimonial labour (Qualification & Employment Proof)	single	Letter	single	Qualification & Employment Proof	single	yes	single
 a2478-harberink-g-a-1440688.pdf	62	1	Testimonial labour (Qualification & Employment Proof)	single	Letter	single	Qualification & Employment Proof	single	yes	single
@@ -1868,7 +1868,7 @@ a2478-hirs-m-1440672.pdf	58	1	Testimonial labour (Qualification & Employment Pro
 a2478-hirs-m-1440672.pdf	59	1	Testimonial labour (Qualification & Employment Proof)	single	Other	single	Qualification & Employment Proof	single	yes	single
 a2478-hirs-m-1440672.pdf	60	1	Testimonial medical form (Medical & Health Documents)	single	Structured Form	single	Medical & Health Documents	single	yes	single
 a2478-hirs-m-1440672.pdf	61	1	Testimonial labour (Qualification & Employment Proof)	single	Other	single	Qualification & Employment Proof	single	yes	single
-a2478-hirs-m-1440672.pdf	62	1	Testimonial status (Application Documents)	single	Other	single	Other	single	yes	single
+a2478-hirs-m-1440672.pdf	62	1	Testmonial status (Application Documents)	single	Other	single	Other	single	yes	single
 a2478-hogevonder-a-1429377.pdf	1	1	NAA cover	single	Cover	single	Other	single	yes	single
 a2478-hogevonder-a-1429377.pdf	2	1	D.1	single	Structured Form	single	Application Documents	single	yes	single
 a2478-hogevonder-a-1429377.pdf	3	1	D.1	single	Structured Form	single	Application Documents	single	no	single
@@ -2028,7 +2028,7 @@ a2478-hooites-a-1423671.pdf	27	1	Testimonial labour (Qualification & Employment 
 a2478-hooites-a-1423671.pdf	28	1	Testimonial labour (Qualification & Employment Proof)	single	Other	single	Qualification & Employment Proof	single	yes	single
 a2478-hooites-a-1423671.pdf	29	1	Testimonial labour (Qualification & Employment Proof)	single	Other	single	Qualification & Employment Proof	single	yes	single
 a2478-hooites-a-1423671.pdf	30	1	Testimonial labour (Qualification & Employment Proof)	single	Other	single	Qualification & Employment Proof	single	yes	single
-a2478-hooites-a-1423671.pdf	31	1	Testimonial status (Application Documents)	single	Other	single	Medical & Health Documents	single	yes	single
+a2478-hooites-a-1423671.pdf	31	1	Testmonial status (Application Documents)	single	Other	single	Medical & Health Documents	single	yes	single
 a2478-hooites-a-1423671.pdf	32	1	Testimonial medical form (Medical & Health Documents)	single	Structured Form	single	Medical & Health Documents	single	yes	single
 a2478-hooites-a-1423671.pdf	33	1	Report of selection and medical officers	single	Structured Form	single	Decision Documents	single	yes	single
 a2478-hooites-a-1423671.pdf	34	1	Report of selection and medical officers	single	Structured Form	single	Decision Documents	single	no	single
@@ -2381,7 +2381,7 @@ a2478-kingma-s-1431736.pdf	64	1	Report of selection and medical officers	single	
 a2478-kingma-s-1431736.pdf	65	1	Report of selection and medical officers	single	Structured Form	single	Decision Documents	single	no	single
 a2478-kingma-s-1431736.pdf	66	1	Checksheet Form No. XS 1	single	Structured Form	single	Administrative & Internal Processing Documents	single	yes	single
 a2478-kingma-s-1431736.pdf	67	1	Checksheet Form No. XS 1	single	Structured Form	single	Administrative & Internal Processing Documents	single	no	single
-a2478-kingma-s-1431736.pdf	68	1	Testimonial status (Application Documents)	single	Structured Form	single	Application Documents	single	yes	single
+a2478-kingma-s-1431736.pdf	68	1	Testmonial status (Application Documents)	single	Structured Form	single	Application Documents	single	yes	single
 a2478-kingma-s-1431736.pdf	69	1	Letter about procedure (Other)	single	Letter	single	Other	single	yes	single
 a2478-kingma-s-1431736.pdf	70	1	Form No. 136 (Trade Pro Forma)	single	Structured Form	single	Qualification & Employment Proof	single	no	single
 a2478-kingma-s-1431736.pdf	71	1	Form No. 136 (Trade Pro Forma)	single	Structured Form	single	Qualification & Employment Proof	single	no	single
@@ -2410,8 +2410,8 @@ a2478-klein-d-1200878.pdf	9	1	NAMA agreement	single	Structured Form	single	Appli
 a2478-klein-d-1200878.pdf	10	1	NAMA agreement	single	Structured Form	single	Application Documents	single	no	single
 a2478-klein-d-1200878.pdf	11	1	Registration card	single	Card (Index Card)	single	Administrative & Internal Processing Documents	single	yes	single
 a2478-klein-d-1200878.pdf	12	1	Judicial and political background check	single	Structured Form	single	Security & Political Screening Documents	single	yes	single
-a2478-klein-d-1200878.pdf	13	1	Testimonial status (Application Documents)	single	Letter	single	Application Documents	single	yes	single
-a2478-klein-d-1200878.pdf	14	1	Testimonial status (Application Documents)	single	Letter	single	Application Documents	single	yes	single
+a2478-klein-d-1200878.pdf	13	1	Testmonial status (Application Documents)	single	Letter	single	Application Documents	single	yes	single
+a2478-klein-d-1200878.pdf	14	1	Testmonial status (Application Documents)	single	Letter	single	Application Documents	single	yes	single
 a2478-klein-d-1200878.pdf	15	1	D.2	single	Structured Form	single	Application Documents	single	yes	single
 a2478-klein-d-1200878.pdf	16	1	D.1	single	Structured Form	single	Application Documents	single	yes	single
 a2478-klein-d-1200878.pdf	17	1	D.1	single	Structured Form	single	Application Documents	single	no	single
