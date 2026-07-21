@@ -195,7 +195,7 @@ def add_splits(merged_df: pd.DataFrame, random_seed: int = 8963764) -> pd.DataFr
         'Functional Categories': 'func_label',
     }
     merged_df = merged_df.rename(columns=column_map)
-    merged_df['dossier'] = merged_df.dossier_name.apply(lambda x: x.replace('.pmerged_df', ''))
+    merged_df['dossier'] = merged_df.dossier_name.apply(lambda x: x.replace('.pdf', ''))
 
     merged_df['img_path'] = merged_df.apply(lambda row: img_path(row['dossier'], row['page_num']), axis=1)
     merged_df['text_path'] = merged_df.apply(lambda row: text_path(row['dossier'], row['page_num']), axis=1)
