@@ -42,13 +42,14 @@ value.
 from __future__ import annotations
 
 import argparse
+import json
 from collections import Counter
 from pathlib import Path
 
 import pandas as pd
 import torch
 import torch.nn.functional as F
-from sklearn.metrics import classification_report, f1_score, precision_recall_fscore_support
+from sklearn.metrics import classification_report, confusion_matrix, f1_score, precision_recall_fscore_support
 from torch.utils.data import DataLoader
 from torchvision.datasets.folder import default_loader
 from transformers import AutoTokenizer
@@ -118,13 +119,23 @@ def class_weights_from_samples(samples, num_classes: int) -> torch.Tensor:
     return freq.sum() / (num_classes * freq)
 
 
+def format_confusion_matrix(matrix: list[list[int]], labels: list[str]) -> str:
+    """A readable aligned text grid (true label = row, predicted = column).
+    Can get wide for many classes, but that's inherent to confusion
+    matrices - fine once redirected to a file."""
+    df = pd.DataFrame(matrix, index=labels, columns=labels)
+    df.index.name = "true \\ pred"
+    return df.to_string()
+
+
 def _classification_metrics(preds: list[int], targets: list[int], classes: list[str]) -> dict:
     accuracy = sum(p == t for p, t in zip(preds, targets)) / max(1, len(targets))
     macro_f1 = f1_score(targets, preds, average="macro", zero_division=0)
     report = classification_report(
         targets, preds, labels=list(range(len(classes))), target_names=classes, zero_division=0
     )
-    return {"accuracy": accuracy, "macro_f1": macro_f1, "report": report}
+    cm = confusion_matrix(targets, preds, labels=list(range(len(classes)))).tolist()
+    return {"accuracy": accuracy, "macro_f1": macro_f1, "report": report, "confusion_matrix": cm}
 
 
 # --------------------------------------------------------------------------
@@ -188,6 +199,7 @@ def train_page_model(model, train_loader, val_loader, test_loader, classes, devi
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     weight_tensor = class_weights.to(device) if class_weights is not None else None
     best_metric, best_state = -1.0, None
+    history = []
 
     for epoch in range(1, epochs + 1):
         model.train()
@@ -204,13 +216,17 @@ def train_page_model(model, train_loader, val_loader, test_loader, classes, devi
         if scheduler is not None:
             scheduler.step()
 
-        msg = f"epoch {epoch:>3}/{epochs}  loss={running_loss / max(1, n_batches):.4f}"
-        tracked = -running_loss
+        entry = {"epoch": epoch, "train_loss": running_loss / max(1, n_batches)}
+        msg = f"epoch {epoch:>3}/{epochs}  loss={entry['train_loss']:.4f}"
+        tracked = -entry["train_loss"]
         if val_loader is not None:
             metrics = evaluate_page_model(model, val_loader, device, classes, forward_fn)
+            entry["val_accuracy"] = metrics["accuracy"]
+            entry["val_macro_f1"] = metrics["macro_f1"]
             msg += f"  val_acc={metrics['accuracy']:.3f} val_macro_f1={metrics['macro_f1']:.3f}"
             tracked = metrics["macro_f1"]
         print(msg)
+        history.append(entry)
 
         if tracked > best_metric:
             best_metric = tracked
@@ -219,6 +235,9 @@ def train_page_model(model, train_loader, val_loader, test_loader, classes, devi
     if best_state is not None:
         model.load_state_dict(best_state)
         torch.save(model.state_dict(), out_dir / "model.pt")
+
+    (out_dir / "history.json").write_text(json.dumps(history, indent=2))
+    (out_dir / "classes.json").write_text(json.dumps(classes, indent=2))
 
     if test_loader is not None:
         if tta_views and tta_views > 1:
@@ -231,6 +250,12 @@ def train_page_model(model, train_loader, val_loader, test_loader, classes, devi
             print(f"\ntest accuracy={metrics['accuracy']:.3f}  macro-F1={metrics['macro_f1']:.3f}")
         print(metrics["report"])
         (out_dir / "test_report.txt").write_text(metrics["report"])
+        (out_dir / "confusion_matrix.json").write_text(
+            json.dumps({"labels": classes, "matrix": metrics["confusion_matrix"]}, indent=2)
+        )
+        (out_dir / "confusion_matrix.txt").write_text(
+            format_confusion_matrix(metrics["confusion_matrix"], classes)
+        )
 
 
 def run_page(args, target_column: str):
@@ -322,7 +347,12 @@ def compute_sequence_losses(out: dict, batch: dict, device, start_pos_weight: fl
 
 
 @torch.no_grad()
-def evaluate_sequence(embedder, seq_model, loader: DataLoader, device) -> dict:
+def evaluate_sequence(embedder, seq_model, loader: DataLoader, device,
+                       classes: dict[str, list[str]] | None = None) -> dict:
+    """classes (optional): {"doctype": [...], "layout": [...], "functional": [...]}
+    - when given, a full sklearn classification_report is also computed per
+    task (and for start-page). Only pass this for the final test evaluation,
+    not the per-epoch val one - it's needlessly expensive/verbose otherwise."""
     embedder.eval()
     seq_model.eval()
 
@@ -351,6 +381,11 @@ def evaluate_sequence(embedder, seq_model, loader: DataLoader, device) -> dict:
         start_true_cat, start_pred_cat, average="binary", zero_division=0
     )
     metrics = {"start_precision": precision, "start_recall": recall, "start_f1": f1}
+    if classes is not None:
+        metrics["start_report"] = classification_report(
+            start_true_cat, start_pred_cat, target_names=["not_start_page", "start_page"], zero_division=0
+        )
+        metrics["start_confusion_matrix"] = confusion_matrix(start_true_cat, start_pred_cat, labels=[0, 1]).tolist()
 
     for key in task_true:
         true_cat = torch.cat(task_true[key]) if task_true[key] else torch.tensor([])
@@ -361,6 +396,14 @@ def evaluate_sequence(embedder, seq_model, loader: DataLoader, device) -> dict:
             continue
         metrics[f"{key}_accuracy"] = (true_cat == pred_cat).float().mean().item()
         metrics[f"{key}_macro_f1"] = f1_score(true_cat.numpy(), pred_cat.numpy(), average="macro", zero_division=0)
+        if classes is not None and key in classes:
+            metrics[f"{key}_report"] = classification_report(
+                true_cat.numpy(), pred_cat.numpy(), labels=list(range(len(classes[key]))),
+                target_names=classes[key], zero_division=0,
+            )
+            metrics[f"{key}_confusion_matrix"] = confusion_matrix(
+                true_cat.numpy(), pred_cat.numpy(), labels=list(range(len(classes[key])))
+            ).tolist()
 
     return metrics
 
@@ -430,6 +473,7 @@ def run_sequence(args, targets: list[str]):
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     best_metric, best_state = -1.0, None
+    history = []
 
     for epoch in range(1, args.epochs + 1):
         embedder.train()
@@ -465,6 +509,13 @@ def run_sequence(args, targets: list[str]):
             f"layout_f1={val_metrics['layout_macro_f1']:.3f} functional_f1={val_metrics['functional_macro_f1']:.3f}"
             f"  [tracked ({'+'.join(targets)})={tracked:.3f}]"
         )
+        history.append({
+            "epoch": epoch,
+            "train_loss": avg["total"], "train_loss_start": avg["start"], "train_loss_doctype": avg["doctype"],
+            "train_loss_layout": avg["layout"], "train_loss_functional": avg["functional"],
+            **{f"val_{k}": v for k, v in val_metrics.items()},
+            "tracked": tracked,
+        })
 
         if tracked > best_metric:
             best_metric = tracked
@@ -478,10 +529,38 @@ def run_sequence(args, targets: list[str]):
         seq_model.load_state_dict(best_state["seq_model"])
         torch.save(best_state, args.out_dir / "sequence_model.pt")
 
-    test_metrics = evaluate_sequence(embedder, seq_model, test_loader, device)
+    (args.out_dir / "history.json").write_text(json.dumps(history, indent=2))
+    (args.out_dir / "classes.json").write_text(json.dumps({
+        "document_type": doctype_classes, "layout_type": layout_classes, "functional_category": functional_classes,
+    }, indent=2))
+
+    class_lists = {"doctype": doctype_classes, "layout": layout_classes, "functional": functional_classes}
+    test_metrics = evaluate_sequence(embedder, seq_model, test_loader, device, classes=class_lists)
+
     print(f"\ntest metrics (tracked targets: {', '.join(targets)}):")
+    report_lines = [f"tracked targets: {', '.join(targets)}", ""]
     for k, v in test_metrics.items():
+        if k.endswith("_report") or k.endswith("_confusion_matrix"):
+            continue
         print(f"  {k}: {v:.3f}")
+        report_lines.append(f"{k}: {v:.3f}")
+    for k, v in test_metrics.items():
+        if k.endswith("_report"):
+            report_lines.append(f"\n--- {k} ---\n{v}")
+    (args.out_dir / "test_report.txt").write_text("\n".join(report_lines))
+
+    cm_json = {"start_page": {"labels": ["not_start_page", "start_page"],
+                               "matrix": test_metrics["start_confusion_matrix"]}}
+    cm_text = [f"--- start_page ---\n{format_confusion_matrix(test_metrics['start_confusion_matrix'], ['not_start_page', 'start_page'])}"]
+    target_names = {"doctype": "document_type", "layout": "layout_type", "functional": "functional_category"}
+    for key, labels in class_lists.items():
+        matrix = test_metrics.get(f"{key}_confusion_matrix")
+        if matrix is None:
+            continue
+        cm_json[target_names[key]] = {"labels": labels, "matrix": matrix}
+        cm_text.append(f"--- {target_names[key]} ---\n{format_confusion_matrix(matrix, labels)}")
+    (args.out_dir / "confusion_matrices.json").write_text(json.dumps(cm_json, indent=2))
+    (args.out_dir / "confusion_matrices.txt").write_text("\n\n".join(cm_text))
 
 
 # --------------------------------------------------------------------------

@@ -48,6 +48,9 @@ LAYOUT_COL = "Layout Type Classification"
 FUNCTIONAL_COL = "Functional Categories"
 START_PAGE_COL = "Start page"
 
+PNG_ROOT   = Path('data/image-per-page')
+TEXT_ROOT  = Path('data/text-per-page')
+
 VOTED_COLUMNS = [DOCTYPE_COL, LAYOUT_COL, FUNCTIONAL_COL, START_PAGE_COL]
 
 
@@ -175,6 +178,15 @@ def merge(long_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     return merged_df, disagreement_df
 
 
+def img_path(dossier: str, page_num: int) -> Path:
+    """pdf_pages_png/<dossier>/<dossier>_page_XXXX.png"""
+    return PNG_ROOT / dossier / f'{dossier}_page_{int(page_num):04d}.png'
+
+def text_path(dossier: str, page_num: int) -> Path:
+    """outputs/page_text_by_page/<dossier>/page/page_XXXX.txt"""
+    return TEXT_ROOT / dossier / 'page' / f'page_{int(page_num):04d}.txt'
+
+
 def add_splits(merged_df: pd.DataFrame, random_seed: int = 8963764) -> pd.DataFrame:
     column_map = {
         'Start page': 'is_start',
@@ -187,14 +199,14 @@ def add_splits(merged_df: pd.DataFrame, random_seed: int = 8963764) -> pd.DataFr
 
     merged_df['img_path'] = merged_df.apply(lambda row: img_path(row['dossier'], row['page_num']), axis=1)
     merged_df['text_path'] = merged_df.apply(lambda row: text_path(row['dossier'], row['page_num']), axis=1)
-    train, validate, test = np.split(merged_df.sample(frac=1, random_state=random_seed), 
-                                 [int(.6*len(merged_df)), int(.8*len(merged_df))])
+    dossiers = merged_df[['dossier_name']].drop_duplicates()
+    train, validate, test = np.split(dossiers.sample(frac=1, random_state=random_seed), 
+                                 [int(.6*len(dossiers)), int(.8*len(dossiers))])
     train['split'] = 'train'
     validate['split'] = 'val'
     test['split'] = 'test'
-    return pd.concat([train, validate, test])
-
-
+    dossiers = pd.concat([train, validate, test])
+    return pd.merge(merged_df, dossiers, on='dossier_name')
 
 
 def main():
