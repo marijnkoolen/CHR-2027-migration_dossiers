@@ -119,6 +119,24 @@ def class_weights_from_samples(samples, num_classes: int) -> torch.Tensor:
     return freq.sum() / (num_classes * freq)
 
 
+def resolve_amp(args, device: torch.device) -> bool:
+    """bf16 autocast, not fp16: on Ampere+ (A10 included) bf16 has the same
+    exponent range as fp32, so there's no overflow/GradScaler machinery
+    needed - it's a straightforward memory/speed win. --amp auto only
+    enables it on CUDA, where this is well-supported and tested; MPS/CPU
+    autocast coverage is patchier, so those stay off unless forced with
+    --amp on."""
+    if args.amp == "on":
+        return True
+    if args.amp == "off":
+        return False
+    return device.type == "cuda"
+
+
+def autocast_context(device: torch.device, enabled: bool):
+    return torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=enabled)
+
+
 def format_confusion_matrix(matrix: list[list[int]], labels: list[str]) -> str:
     """A readable aligned text grid (true label = row, predicted = column).
     Can get wide for many classes, but that's inherent to confusion
@@ -158,11 +176,12 @@ def make_multimodal_forward(model, device):
 
 
 @torch.no_grad()
-def evaluate_page_model(model, loader: DataLoader, device, classes: list[str], forward_fn) -> dict:
+def evaluate_page_model(model, loader: DataLoader, device, classes: list[str], forward_fn, amp: bool = False) -> dict:
     model.eval()
     all_preds, all_targets = [], []
     for batch in loader:
-        logits, targets = forward_fn(batch)
+        with autocast_context(device, amp):
+            logits, targets = forward_fn(batch)
         all_preds.extend(logits.argmax(dim=1).cpu().tolist())
         all_targets.extend(targets.cpu().tolist())
     return _classification_metrics(all_preds, all_targets, classes)
@@ -170,7 +189,7 @@ def evaluate_page_model(model, loader: DataLoader, device, classes: list[str], f
 
 @torch.no_grad()
 def evaluate_page_model_tta(model, dataset, classes: list[str], device, image_size: int,
-                             n_views: int, batch_size: int) -> dict:
+                             n_views: int, batch_size: int, amp: bool = False) -> dict:
     """Vision-only test-time augmentation: averages softmax over the plain
     view plus a few augmented ones. `dataset` must expose `.samples` as
     (path, ..., label_idx) tuples (both ImageFolder and MultimodalManifestDataset do)."""
@@ -186,7 +205,9 @@ def evaluate_page_model_tta(model, dataset, classes: list[str], device, image_si
         probs_sum = None
         for transform in [plain_transform] + [tta_transform] * (n_views - 1):
             images = torch.stack([transform(default_loader(s[0])) for s in batch]).to(device)
-            probs = F.softmax(model(images), dim=1).cpu()
+            with autocast_context(device, amp):
+                logits = model(images)
+            probs = F.softmax(logits, dim=1).cpu()
             probs_sum = probs if probs_sum is None else probs_sum + probs
         all_preds.extend((probs_sum / n_views).argmax(dim=1).tolist())
         all_targets.extend(targets)
@@ -195,7 +216,8 @@ def evaluate_page_model_tta(model, dataset, classes: list[str], device, image_si
 
 def train_page_model(model, train_loader, val_loader, test_loader, classes, device, epochs,
                       optimizer, scheduler, forward_fn, out_dir: Path,
-                      class_weights: torch.Tensor | None = None, tta_views: int = 0, image_size: int = 224):
+                      class_weights: torch.Tensor | None = None, tta_views: int = 0, image_size: int = 224,
+                      amp: bool = False):
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     weight_tensor = class_weights.to(device) if class_weights is not None else None
     best_metric, best_state = -1.0, None
@@ -205,8 +227,9 @@ def train_page_model(model, train_loader, val_loader, test_loader, classes, devi
         model.train()
         running_loss, n_batches = 0.0, 0
         for batch in train_loader:
-            logits, targets = forward_fn(batch)
-            loss = F.cross_entropy(logits, targets, weight=weight_tensor)
+            with autocast_context(device, amp):
+                logits, targets = forward_fn(batch)
+                loss = F.cross_entropy(logits, targets, weight=weight_tensor)
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
@@ -220,7 +243,7 @@ def train_page_model(model, train_loader, val_loader, test_loader, classes, devi
         msg = f"epoch {epoch:>3}/{epochs}  loss={entry['train_loss']:.4f}"
         tracked = -entry["train_loss"]
         if val_loader is not None:
-            metrics = evaluate_page_model(model, val_loader, device, classes, forward_fn)
+            metrics = evaluate_page_model(model, val_loader, device, classes, forward_fn, amp=amp)
             entry["val_accuracy"] = metrics["accuracy"]
             entry["val_macro_f1"] = metrics["macro_f1"]
             msg += f"  val_acc={metrics['accuracy']:.3f} val_macro_f1={metrics['macro_f1']:.3f}"
@@ -242,11 +265,11 @@ def train_page_model(model, train_loader, val_loader, test_loader, classes, devi
     if test_loader is not None:
         if tta_views and tta_views > 1:
             metrics = evaluate_page_model_tta(
-                model, test_loader.dataset, classes, device, image_size, tta_views, test_loader.batch_size
+                model, test_loader.dataset, classes, device, image_size, tta_views, test_loader.batch_size, amp=amp
             )
             print(f"\ntest (TTA x{tta_views}) accuracy={metrics['accuracy']:.3f}  macro-F1={metrics['macro_f1']:.3f}")
         else:
-            metrics = evaluate_page_model(model, test_loader, device, classes, forward_fn)
+            metrics = evaluate_page_model(model, test_loader, device, classes, forward_fn, amp=amp)
             print(f"\ntest accuracy={metrics['accuracy']:.3f}  macro-F1={metrics['macro_f1']:.3f}")
         print(metrics["report"])
         (out_dir / "test_report.txt").write_text(metrics["report"])
@@ -260,7 +283,8 @@ def train_page_model(model, train_loader, val_loader, test_loader, classes, devi
 
 def run_page(args, target_column: str):
     device = pick_device(args.device)
-    print(f"device: {device}")
+    amp = resolve_amp(args, device)
+    print(f"device: {device}  amp(bf16): {amp}")
 
     if args.modality == "vision":
         train_loader, val_loader, test_loader, classes = build_dataloaders_from_manifest(
@@ -305,6 +329,7 @@ def run_page(args, target_column: str):
         model, train_loader, val_loader, test_loader, classes, device, args.epochs,
         optimizer, scheduler, forward_fn, args.out_dir,
         class_weights=class_weights, tta_views=(args.tta_views if use_tta else 0), image_size=args.image_size,
+        amp=amp,
     )
 
 
@@ -348,11 +373,19 @@ def compute_sequence_losses(out: dict, batch: dict, device, start_pos_weight: fl
 
 @torch.no_grad()
 def evaluate_sequence(embedder, seq_model, loader: DataLoader, device,
-                       classes: dict[str, list[str]] | None = None) -> dict:
+                       classes: dict[str, list[str]] | None = None, amp: bool = False,
+                       teacher_forced: bool = False) -> dict:
     """classes (optional): {"doctype": [...], "layout": [...], "functional": [...]}
     - when given, a full sklearn classification_report is also computed per
     task (and for start-page). Only pass this for the final test evaluation,
-    not the per-epoch val one - it's needlessly expensive/verbose otherwise."""
+    not the per-epoch val one - it's needlessly expensive/verbose otherwise.
+
+    teacher_forced: segment using ground-truth start-page labels instead of
+    the model's own predictions - not achievable at real inference time, but
+    useful as a diagnostic to check whether low doctype/layout/functional
+    scores are caused by imperfect self-predicted segmentation (see
+    --eval-teacher-forced). start_* metrics are identical either way, since
+    the start-page head's own predictions never depend on this flag."""
     embedder.eval()
     seq_model.eval()
 
@@ -361,8 +394,10 @@ def evaluate_sequence(embedder, seq_model, loader: DataLoader, device,
     task_pred = {"doctype": [], "layout": [], "functional": []}
 
     for batch in loader:
-        embeddings, padding_mask = embed_pages(embedder, batch, device)
-        out = seq_model(embeddings, padding_mask, true_start_page=None)
+        with autocast_context(device, amp):
+            embeddings, padding_mask = embed_pages(embedder, batch, device)
+            true_start = batch["start"].to(device) if teacher_forced else None
+            out = seq_model(embeddings, padding_mask, true_start_page=true_start)
         valid = (~padding_mask).cpu()
 
         start_true.append(batch["start"][valid])
@@ -410,7 +445,8 @@ def evaluate_sequence(embedder, seq_model, loader: DataLoader, device,
 
 def run_sequence(args, targets: list[str]):
     device = pick_device(args.device)
-    print(f"device: {device}")
+    amp = resolve_amp(args, device)
+    print(f"device: {device}  amp(bf16): {amp}")
 
     manifest = pd.read_csv(args.manifest, sep="\t" if str(args.manifest).endswith(".tsv") else ",")
 
@@ -482,9 +518,10 @@ def run_sequence(args, targets: list[str]):
         n_batches = 0
 
         for batch in train_loader:
-            embeddings, padding_mask = embed_pages(embedder, batch, device)
-            out = seq_model(embeddings, padding_mask, true_start_page=batch["start"].to(device))
-            losses = compute_sequence_losses(out, batch, device, start_pos_weight)
+            with autocast_context(device, amp):
+                embeddings, padding_mask = embed_pages(embedder, batch, device)
+                out = seq_model(embeddings, padding_mask, true_start_page=batch["start"].to(device))
+                losses = compute_sequence_losses(out, batch, device, start_pos_weight)
 
             optimizer.zero_grad()
             losses["total"].backward()
@@ -499,7 +536,7 @@ def run_sequence(args, targets: list[str]):
             scheduler.step()
         avg = {k: v / max(1, n_batches) for k, v in running.items()}
 
-        val_metrics = evaluate_sequence(embedder, seq_model, val_loader, device)
+        val_metrics = evaluate_sequence(embedder, seq_model, val_loader, device, amp=amp)
         tracked = sum(val_metrics[TARGET_METRIC_KEY[t]] for t in targets)
         print(
             f"epoch {epoch:>3}/{args.epochs}  loss={avg['total']:.3f} "
@@ -535,7 +572,7 @@ def run_sequence(args, targets: list[str]):
     }, indent=2))
 
     class_lists = {"doctype": doctype_classes, "layout": layout_classes, "functional": functional_classes}
-    test_metrics = evaluate_sequence(embedder, seq_model, test_loader, device, classes=class_lists)
+    test_metrics = evaluate_sequence(embedder, seq_model, test_loader, device, classes=class_lists, amp=amp)
 
     print(f"\ntest metrics (tracked targets: {', '.join(targets)}):")
     report_lines = [f"tracked targets: {', '.join(targets)}", ""]
@@ -561,6 +598,39 @@ def run_sequence(args, targets: list[str]):
         cm_text.append(f"--- {target_names[key]} ---\n{format_confusion_matrix(matrix, labels)}")
     (args.out_dir / "confusion_matrices.json").write_text(json.dumps(cm_json, indent=2))
     (args.out_dir / "confusion_matrices.txt").write_text("\n\n".join(cm_text))
+
+    if args.eval_teacher_forced:
+        oracle_metrics = evaluate_sequence(
+            embedder, seq_model, test_loader, device, classes=class_lists, amp=amp, teacher_forced=True
+        )
+        compare_keys = [
+            "start_f1", "doctype_accuracy", "doctype_macro_f1",
+            "layout_accuracy", "layout_macro_f1", "functional_accuracy", "functional_macro_f1",
+        ]
+        print("\ndiagnostic: self-predicted vs ORACLE (ground-truth) segmentation "
+              "- a big gap means low doctype/layout/functional scores are mostly "
+              "caused by imperfect start-page segmentation, not those heads themselves:")
+        print(f"  {'metric':<22} {'self-predicted':>15} {'oracle':>10}")
+        diag_lines = [
+            "ORACLE (ground-truth start-page) segmentation diagnostic.",
+            "Not achievable at real inference time - compares against the self-predicted",
+            "test metrics in test_report.txt. A big gap here means the doctype/layout/",
+            "functional heads are being hurt mainly by imperfect self-predicted",
+            "segmentation, not by those heads' own learned representations; a small gap",
+            "means segmentation isn't the bottleneck. start_f1 is identical in both",
+            "columns by construction - the start-page head's own predictions never",
+            "depend on this flag, only the *other* heads' segment pooling does.",
+            "",
+            f"{'metric':<22} {'self-predicted':>15} {'oracle':>10}",
+        ]
+        for key in compare_keys:
+            print(f"  {key:<22} {test_metrics[key]:>15.3f} {oracle_metrics[key]:>10.3f}")
+            diag_lines.append(f"{key:<22} {test_metrics[key]:>15.3f} {oracle_metrics[key]:>10.3f}")
+        for key in ("doctype_report", "layout_report", "functional_report"):
+            if key in oracle_metrics:
+                diag_lines.append(f"\n--- oracle {key} ---\n{oracle_metrics[key]}")
+        (args.out_dir / "diagnostic_teacher_forced.txt").write_text("\n".join(diag_lines))
+        print(f"\nWrote {args.out_dir / 'diagnostic_teacher_forced.txt'}")
 
 
 # --------------------------------------------------------------------------
@@ -606,12 +676,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pdf-col", default="dossier_name")
     parser.add_argument("--page-col", default="page_num")
     parser.add_argument("--image-col", default="img_path")
-    parser.add_argument("--pagexml-col", default="text_path")
+    parser.add_argument("--pagexml-col", default="text_page")
     parser.add_argument("--doctype-col", default="doc_type")
     parser.add_argument("--layout-col", default="Layout Type Classification")
     parser.add_argument("--functional-col", default="func_label")
     parser.add_argument("--start-col", default="is_start")
     parser.add_argument("--split-col", default="split")
+
+    parser.add_argument("--amp", choices=["auto", "on", "off"], default="auto",
+                         help="mixed precision (bf16). auto = on for CUDA, off otherwise")
+    parser.add_argument("--eval-teacher-forced", action="store_true",
+                         help="sequence mode only: also evaluate the test set with ground-truth "
+                              "start-page segmentation (oracle), to check how much self-predicted "
+                              "segmentation is hurting doctype/layout/functional - see module docstring")
 
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default=None)
