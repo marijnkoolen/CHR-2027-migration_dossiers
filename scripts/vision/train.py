@@ -676,7 +676,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pdf-col", default="dossier_name")
     parser.add_argument("--page-col", default="page_num")
     parser.add_argument("--image-col", default="img_path")
-    parser.add_argument("--pagexml-col", default="text_page")
+    parser.add_argument("--pagexml-col", default="text_path")
     parser.add_argument("--doctype-col", default="doc_type")
     parser.add_argument("--layout-col", default="Layout Type Classification")
     parser.add_argument("--functional-col", default="func_label")
