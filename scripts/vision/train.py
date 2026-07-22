@@ -63,7 +63,7 @@ from models import (
     trainable_parameter_summary,
 )
 from multimodal_data import build_multimodal_dataloaders
-from sequence_data import IGNORE_INDEX, PageSequenceDataset, build_label_vocab, make_pdf_collate_fn
+from sequence_data import IGNORE_INDEX, PageBudgetBatchSampler, PageSequenceDataset, build_label_vocab, make_pdf_collate_fn
 from sequence_model import SequenceContextModel
 
 TARGET_COLUMN_ARG = {
@@ -516,9 +516,19 @@ def run_sequence(args, targets: list[str]):
     print(f"{len(train_ds)} train PDFs, {len(val_ds)} val PDFs, {len(test_ds)} test PDFs")
 
     collate = make_pdf_collate_fn(tokenizer, args.max_text_length)
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate)
-    test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate)
+
+    def make_loader(ds: PageSequenceDataset, shuffle: bool) -> DataLoader:
+        if args.max_pages_per_batch:
+            sampler = PageBudgetBatchSampler(ds.page_counts(), args.max_pages_per_batch, shuffle=shuffle, seed=args.seed)
+            return DataLoader(ds, batch_sampler=sampler, collate_fn=collate)
+        return DataLoader(ds, batch_size=args.batch_size, shuffle=shuffle, collate_fn=collate)
+
+    train_loader = make_loader(train_ds, shuffle=True)
+    val_loader = make_loader(val_ds, shuffle=False)
+    test_loader = make_loader(test_ds, shuffle=False)
+    if args.max_pages_per_batch:
+        print(f"batching by page budget: max {args.max_pages_per_batch} pages/batch "
+              f"(~{len(train_loader)} train batches/epoch)")
 
     n_pos = sum(row[args.start_col].strip().lower() == "yes" for _, row in
                 manifest[manifest[args.split_col] == "train"].iterrows())
@@ -621,7 +631,7 @@ def run_sequence(args, targets: list[str]):
     # majority-class-only, the model can't fit its own training data - an
     # optimization/capacity problem, not a generalization one.
     train_eval_ds = make_dataset("train", train=False)
-    train_eval_loader = DataLoader(train_eval_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate)
+    train_eval_loader = make_loader(train_eval_ds, shuffle=False)
     train_metrics = evaluate_sequence(embedder, seq_model, train_eval_loader, device, classes=class_lists, amp=amp)
     print("\ntrain-set (no augmentation) metrics:")
     train_report_lines = ["train-set (no augmentation) metrics:", ""]
@@ -722,6 +732,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--unfreeze-text-layers", type=int, default=None)
     parser.add_argument("--image-size", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None, help="pages per batch (page mode) or PDFs per batch (sequence mode)")
+    parser.add_argument("--max-pages-per-batch", type=int, default=None,
+                         help="sequence mode only: cap total pages per batch instead of a fixed PDF count "
+                              "(--batch-size). Real documents here range from a handful of pages to 80+, so a "
+                              "fixed PDF count doesn't bound memory - two long PDFs landing in the same small "
+                              "batch can still OOM. Overrides --batch-size for sequence mode when set.")
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None, help="flat lr, used when --scenario efficient")
     parser.add_argument("--lr-backbone", type=float, default=None, help="used when --scenario quality")
@@ -787,6 +802,9 @@ def main():
     print(f"scenario={args.scenario}  mode={args.mode}  modality={args.modality}  target={targets}")
 
     if args.mode == "page":
+        if args.max_pages_per_batch:
+            raise SystemExit("--max-pages-per-batch only applies to --mode sequence (page-mode batches "
+                              "aren't grouped by PDF); use --batch-size instead.")
         target_column = getattr(args, TARGET_COLUMN_ARG[targets[0]])
         run_page(args, target_column)
     else:

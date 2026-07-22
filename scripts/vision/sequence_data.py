@@ -15,12 +15,13 @@ multimodal mode - see train_sequence.py.
 
 from __future__ import annotations
 
+import math
 import random
 from pathlib import Path
 
 import pandas as pd
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 from torchvision.datasets.folder import default_loader
 
 from pagexml import extract_text
@@ -90,6 +91,12 @@ class PageSequenceDataset(Dataset):
 
     def __len__(self) -> int:
         return len(self.pdfs)
+
+    def page_counts(self) -> list[int]:
+        """Number of pages per PDF, in dataset order - cheap (from the
+        manifest, no image loading) and exactly what a page-budget batch
+        sampler needs to decide how many PDFs it can fit in a batch."""
+        return [len(group) for group in self.pdfs]
 
     def _text_for(self, pagexml_path: str) -> str:
         if not pagexml_path:
@@ -174,3 +181,60 @@ def make_pdf_collate_fn(tokenizer=None, max_text_length: int = 256):
         return result
 
     return collate
+
+
+class PageBudgetBatchSampler(Sampler):
+    """Groups PDF indices into batches so the *total pages* in each batch
+    stays under `max_pages_per_batch`, instead of a fixed number of PDFs.
+
+    Total pages per batch is what actually drives memory here: embed_pages()
+    flattens every real page across every PDF in the batch into one tensor
+    for a single backbone forward pass, so the backbone sees exactly that
+    many images regardless of how the batch is composed. A fixed PDF count
+    (the plain --batch-size path) doesn't bound this - two 80-page PDFs
+    landing in the same batch of 2 costs as much memory as forty 4-page
+    PDFs would in a batch of 40, and real documents here range from a
+    handful of pages to 80+, so that combination isn't a rare edge case.
+
+    Batches are formed greedily (shuffle order, then pack until the next
+    PDF would exceed the budget) - simple, and since the backbone cost
+    depends only on total pages and not on how evenly sized the PDFs in a
+    batch are, there's no efficiency reason to sort by length first.
+    """
+
+    def __init__(self, page_counts: list[int], max_pages_per_batch: int, shuffle: bool = True, seed: int = 0):
+        too_long = [(i, n) for i, n in enumerate(page_counts) if n > max_pages_per_batch]
+        if too_long:
+            longest = max(n for _, n in too_long)
+            raise ValueError(
+                f"{len(too_long)} PDF(s) exceed --max-pages-per-batch ({max_pages_per_batch}) on their own "
+                f"(longest: {longest} pages) - raise --max-pages-per-batch to at least {longest}."
+            )
+        self.page_counts = page_counts
+        self.max_pages_per_batch = max_pages_per_batch
+        self.shuffle = shuffle
+        self.seed = seed
+        self._n_calls = 0
+
+    def __iter__(self):
+        indices = list(range(len(self.page_counts)))
+        if self.shuffle:
+            random.Random(self.seed + self._n_calls).shuffle(indices)
+            self._n_calls += 1
+
+        batch: list[int] = []
+        batch_pages = 0
+        for idx in indices:
+            n = self.page_counts[idx]
+            if batch and batch_pages + n > self.max_pages_per_batch:
+                yield batch
+                batch, batch_pages = [], 0
+            batch.append(idx)
+            batch_pages += n
+        if batch:
+            yield batch
+
+    def __len__(self) -> int:
+        # Approximate: the exact count depends on shuffle order (greedy bin
+        # packing), which varies call to call. Good enough for progress bars.
+        return math.ceil(sum(self.page_counts) / self.max_pages_per_batch)
