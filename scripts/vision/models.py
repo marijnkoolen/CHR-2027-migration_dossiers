@@ -47,6 +47,18 @@ def _find_transformer_blocks(model: nn.Module) -> nn.ModuleList:
     raise ValueError(f"Could not find transformer blocks on {type(model).__name__}")
 
 
+def _attn_implementation_kwargs(device: torch.device | None) -> dict:
+    """MPS's scaled_dot_product_attention kernel doesn't support dropout (as
+    of this PyTorch version) - hit during training, since attention dropout
+    is only active in train() mode. HF's default 'sdpa' attention
+    implementation uses that kernel and so errors there; fall back to the
+    slower but backend-agnostic 'eager' implementation on MPS only, leaving
+    the faster/more memory-efficient SDPA path on CUDA/CPU."""
+    if device is not None and device.type == "mps":
+        return {"attn_implementation": "eager"}
+    return {}
+
+
 def _freeze_all_but_last_n(backbone: nn.Module, unfreeze_last_n: int) -> None:
     for p in backbone.parameters():
         p.requires_grad = False
@@ -62,9 +74,9 @@ class PageEmbedder(nn.Module):
     configurable number of trailing transformer blocks left trainable
     (0 = frozen, linear-probe style)."""
 
-    def __init__(self, backbone_name: str, unfreeze_last_n_blocks: int = 0):
+    def __init__(self, backbone_name: str, unfreeze_last_n_blocks: int = 0, device: torch.device | None = None):
         super().__init__()
-        self.backbone = AutoModel.from_pretrained(backbone_name)
+        self.backbone = AutoModel.from_pretrained(backbone_name, **_attn_implementation_kwargs(device))
         self.embed_dim = self.backbone.config.hidden_size
         # Some backbones (Beit/DiT) need an explicit flag to interpolate their
         # position embeddings for input sizes other than the pretraining
@@ -94,9 +106,10 @@ class PageEmbedder(nn.Module):
 class BackboneClassifier(nn.Module):
     """A PageEmbedder + linear head, for plain single-image classification."""
 
-    def __init__(self, backbone_name: str, num_classes: int, unfreeze_last_n_blocks: int = 0):
+    def __init__(self, backbone_name: str, num_classes: int, unfreeze_last_n_blocks: int = 0,
+                 device: torch.device | None = None):
         super().__init__()
-        self.embedder = PageEmbedder(backbone_name, unfreeze_last_n_blocks)
+        self.embedder = PageEmbedder(backbone_name, unfreeze_last_n_blocks, device=device)
         self.head = nn.Sequential(nn.LayerNorm(self.embedder.embed_dim), nn.Linear(self.embedder.embed_dim, num_classes))
 
     @property
@@ -114,10 +127,10 @@ class TextEmbedder(nn.Module):
     backbone is frozen or only lightly fine-tuned)."""
 
     def __init__(self, backbone_name: str = "xlm-roberta-base", unfreeze_last_n_layers: int = 0,
-                 max_length: int = 256):
+                 max_length: int = 256, device: torch.device | None = None):
         super().__init__()
         self.tokenizer = AutoTokenizer.from_pretrained(backbone_name)
-        self.backbone = AutoModel.from_pretrained(backbone_name)
+        self.backbone = AutoModel.from_pretrained(backbone_name, **_attn_implementation_kwargs(device))
         self.embed_dim = self.backbone.config.hidden_size
         self.max_length = max_length
         _freeze_all_but_last_n(self.backbone, unfreeze_last_n_layers)
@@ -148,10 +161,11 @@ class MultimodalPageEmbedder(nn.Module):
         unfreeze_text_layers: int = 0,
         max_text_length: int = 256,
         project_to: int | None = None,
+        device: torch.device | None = None,
     ):
         super().__init__()
-        self.image_embedder = PageEmbedder(image_backbone, unfreeze_image_blocks)
-        self.text_embedder = TextEmbedder(text_backbone, unfreeze_text_layers, max_text_length)
+        self.image_embedder = PageEmbedder(image_backbone, unfreeze_image_blocks, device=device)
+        self.text_embedder = TextEmbedder(text_backbone, unfreeze_text_layers, max_text_length, device=device)
 
         combined_dim = self.image_embedder.embed_dim + self.text_embedder.embed_dim
         if project_to:
@@ -179,10 +193,12 @@ class MultimodalBackboneClassifier(nn.Module):
         unfreeze_text_layers: int = 0,
         max_text_length: int = 256,
         project_to: int | None = None,
+        device: torch.device | None = None,
     ):
         super().__init__()
         self.embedder = MultimodalPageEmbedder(
-            image_backbone, text_backbone, unfreeze_image_blocks, unfreeze_text_layers, max_text_length, project_to
+            image_backbone, text_backbone, unfreeze_image_blocks, unfreeze_text_layers, max_text_length, project_to,
+            device=device,
         )
         self.head = nn.Sequential(nn.LayerNorm(self.embedder.embed_dim), nn.Linear(self.embedder.embed_dim, num_classes))
 

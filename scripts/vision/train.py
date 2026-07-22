@@ -309,7 +309,7 @@ def run_page(args, target_column: str):
             augment_strength=args.augment_strength, seed=args.seed,
         )
         model = BackboneClassifier(
-            args.image_backbone, len(classes), unfreeze_last_n_blocks=args.unfreeze_image_blocks
+            args.image_backbone, len(classes), unfreeze_last_n_blocks=args.unfreeze_image_blocks, device=device
         ).to(device)
         forward_fn = make_vision_forward(model, device)
     else:
@@ -323,7 +323,7 @@ def run_page(args, target_column: str):
         model = MultimodalBackboneClassifier(
             args.image_backbone, len(classes), text_backbone=args.text_backbone,
             unfreeze_image_blocks=args.unfreeze_image_blocks, unfreeze_text_layers=args.unfreeze_text_layers,
-            max_text_length=args.max_text_length, project_to=args.project_to,
+            max_text_length=args.max_text_length, project_to=args.project_to, device=device,
         ).to(device)
         forward_fn = make_multimodal_forward(model, device)
 
@@ -505,10 +505,12 @@ def run_sequence(args, targets: list[str]):
         embedder = MultimodalPageEmbedder(
             image_backbone=args.image_backbone, text_backbone=args.text_backbone,
             unfreeze_image_blocks=args.unfreeze_image_blocks, unfreeze_text_layers=args.unfreeze_text_layers,
-            max_text_length=args.max_text_length, project_to=args.project_to,
+            max_text_length=args.max_text_length, project_to=args.project_to, device=device,
         ).to(device)
     else:
-        embedder = PageEmbedder(args.image_backbone, unfreeze_last_n_blocks=args.unfreeze_image_blocks).to(device)
+        embedder = PageEmbedder(
+            args.image_backbone, unfreeze_last_n_blocks=args.unfreeze_image_blocks, device=device
+        ).to(device)
 
     seq_model = SequenceContextModel(
         embed_dim=embedder.embed_dim, num_doctype=len(doctype_classes), num_layout=len(layout_classes),
