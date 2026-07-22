@@ -94,6 +94,17 @@ PRESETS = {
     ),
 }
 
+# Sequence mode co-trains the backbone with a from-scratch Transformer +
+# four heads; on a modest amount of data (a few dozen PDFs) that's a
+# harder, higher-variance optimization problem than fine-tuning helps with -
+# confirmed empirically (frozen backbone scored substantially higher on all
+# four heads than 2 unfrozen blocks, holding everything else, including the
+# per-group gradient clipping fix, constant). Page mode's plain linear head
+# doesn't have this joint-optimization issue, so its defaults are untouched.
+SEQUENCE_MODE_OVERRIDES = {
+    "efficient": dict(unfreeze_image_blocks=0, unfreeze_text_layers=0),
+}
+
 
 # --------------------------------------------------------------------------
 # Shared helpers
@@ -111,6 +122,21 @@ def differential_param_groups(embedder_params, other_params, args) -> list[dict]
         {"params": [p for p in other_params if p.requires_grad], "lr": lr_head},
     ]
     return [g for g in groups if g["params"]]
+
+
+def clip_grad_norm_per_group(optimizer: torch.optim.Optimizer, max_norm: float = 1.0) -> None:
+    """Clips each optimizer param group's gradients to its own max_norm,
+    rather than one combined norm across all groups together. The backbone
+    (pretrained, only partially unfrozen) and the head/sequence-context
+    model (randomly initialized, learning from scratch) can have very
+    different gradient-norm scales; a single shared clip lets whichever
+    group has the larger norm dictate the scaling factor applied to *both*,
+    which can silently starve the smaller-normed group of most of its
+    update - exactly the kind of thing that looks like "it never learns
+    anything" without ever raising an error."""
+    for group in optimizer.param_groups:
+        if group["params"]:
+            torch.nn.utils.clip_grad_norm_(group["params"], max_norm=max_norm)
 
 
 def class_weights_from_samples(samples, num_classes: int) -> torch.Tensor:
@@ -218,7 +244,6 @@ def train_page_model(model, train_loader, val_loader, test_loader, classes, devi
                       optimizer, scheduler, forward_fn, out_dir: Path,
                       class_weights: torch.Tensor | None = None, tta_views: int = 0, image_size: int = 224,
                       amp: bool = False):
-    trainable_params = [p for p in model.parameters() if p.requires_grad]
     weight_tensor = class_weights.to(device) if class_weights is not None else None
     best_metric, best_state = -1.0, None
     history = []
@@ -232,7 +257,7 @@ def train_page_model(model, train_loader, val_loader, test_loader, classes, devi
                 loss = F.cross_entropy(logits, targets, weight=weight_tensor)
             optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
+            clip_grad_norm_per_group(optimizer)
             optimizer.step()
             running_loss += loss.item()
             n_batches += 1
@@ -523,7 +548,6 @@ def run_sequence(args, targets: list[str]):
     groups = differential_param_groups(embedder_params, seq_params, args)
     optimizer = torch.optim.AdamW(groups, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
-    trainable_params = [p for p in embedder_params if p.requires_grad] + seq_params
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     best_metric, best_state = -1.0, None
@@ -543,7 +567,7 @@ def run_sequence(args, targets: list[str]):
 
             optimizer.zero_grad()
             losses["total"].backward()
-            torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
+            clip_grad_norm_per_group(optimizer)
             optimizer.step()
 
             for k in running:
@@ -734,7 +758,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def apply_scenario_preset(args: argparse.Namespace) -> None:
-    for key, value in PRESETS[args.scenario].items():
+    preset = dict(PRESETS[args.scenario])
+    if args.mode == "sequence":
+        preset.update(SEQUENCE_MODE_OVERRIDES.get(args.scenario, {}))
+    for key, value in preset.items():
         if getattr(args, key, None) is None:
             setattr(args, key, value)
 
