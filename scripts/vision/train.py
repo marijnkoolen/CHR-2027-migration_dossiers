@@ -750,14 +750,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          help="multimodal only: project the fused embedding to this size (default: no projection)")
 
     # Manifest column names (defaults match this project's real annotation schema)
-    parser.add_argument("--pdf-col", default="dossier_name")
+    parser.add_argument("--pdf-col", default="pdf_name")
     parser.add_argument("--page-col", default="page_num")
     parser.add_argument("--image-col", default="img_path")
     parser.add_argument("--pagexml-col", default="text_path")
-    parser.add_argument("--doctype-col", default="doc_type")
-    parser.add_argument("--layout-col", default="Layout Type Classification")
-    parser.add_argument("--functional-col", default="func_label")
-    parser.add_argument("--start-col", default="is_start")
+    parser.add_argument("--doctype-col", default="document_type")
+    parser.add_argument("--layout-col", default="layout_type")
+    parser.add_argument("--functional-col", default="functional_category")
+    parser.add_argument("--start-col", default="start_page")
     parser.add_argument("--split-col", default="split")
 
     parser.add_argument("--amp", choices=["auto", "on", "off"], default="auto",

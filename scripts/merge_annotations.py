@@ -189,24 +189,30 @@ def text_path(dossier: str, page_num: int) -> Path:
 
 def add_splits(merged_df: pd.DataFrame, random_seed: int = 8963764) -> pd.DataFrame:
     column_map = {
-        'Start page': 'is_start',
+        'dossier_name': 'pdf_name',
         'page number': 'page_num',
-        'Document type': 'doc_type',
-        'Functional Categories': 'func_label',
+        'Document type': 'document_type',
+        'Document type_agreement': 'document_type_agreement',
+        'Layout Type Classification': 'layout_type',
+        'Layout Type Classification_agreement': 'layout_type_agreement',
+        'Functional Categories': 'functional_category',
+        'Functional Categories_agreement': 'functional_category_agreement',
+        'Start page': 'start_page',
+        'Start page_agreement': 'start_page_agreement',
     }
     merged_df = merged_df.rename(columns=column_map)
-    merged_df['dossier'] = merged_df.dossier_name.apply(lambda x: x.replace('.pdf', ''))
+    merged_df['pdf_id'] = merged_df.pdf_name.apply(lambda x: x.replace('.pdf', ''))
 
-    merged_df['img_path'] = merged_df.apply(lambda row: img_path(row['dossier'], row['page_num']), axis=1)
-    merged_df['text_path'] = merged_df.apply(lambda row: text_path(row['dossier'], row['page_num']), axis=1)
-    dossiers = merged_df[['dossier_name']].drop_duplicates()
+    merged_df['img_path'] = merged_df.apply(lambda row: img_path(row['pdf_id'], row['page_num']), axis=1)
+    merged_df['text_path'] = merged_df.apply(lambda row: text_path(row['pdf_id'], row['page_num']), axis=1)
+    dossiers = merged_df[['pdf_name']].drop_duplicates()
     train, validate, test = np.split(dossiers.sample(frac=1, random_state=random_seed), 
                                  [int(.6*len(dossiers)), int(.8*len(dossiers))])
     train['split'] = 'train'
     validate['split'] = 'val'
     test['split'] = 'test'
     dossiers = pd.concat([train, validate, test])
-    return pd.merge(merged_df, dossiers, on='dossier_name')
+    return pd.merge(merged_df, dossiers, on='pdf_name')
 
 
 def main():
