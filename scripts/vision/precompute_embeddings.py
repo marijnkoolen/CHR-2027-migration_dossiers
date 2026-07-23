@@ -75,7 +75,7 @@ def main():
     parser.add_argument("--doctype-col", default="document_type")
     parser.add_argument("--layout-col", default="layout_type")
     parser.add_argument("--functional-col", default="functional_category")
-    parser.add_argument("--start-col", default="page_start")
+    parser.add_argument("--start-col", default="start_page")
     parser.add_argument("--split-col", default="split")
     parser.add_argument("--device", default=None)
     args = parser.parse_args()
