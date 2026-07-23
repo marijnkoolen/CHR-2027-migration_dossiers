@@ -106,8 +106,13 @@ SEQUENCE_MODE_OVERRIDES = {
     # DiT-large's 1024-dim embedding overparameterizes SequenceContextModel's
     # heads against a PDF-level training set this small - confirmed directly
     # (reproduced the collapse, then fixed it by projecting down to 384,
-    # matching efficient's DINOv2-small dimensionality).
-    "quality": dict(project_to=384),
+    # matching efficient's DINOv2-small dimensionality). Frozen backbone by
+    # default too, same reasoning as efficient above plus a practical one:
+    # full-unfreezing a 304M-param backbone is what caused the original A10
+    # OOM in sequence mode, independent of the dimensionality issue - the
+    # project_to fix doesn't remove that cost, since it sits after the
+    # backbone, not inside it.
+    "quality": dict(project_to=384, unfreeze_image_blocks=0, unfreeze_text_layers=0),
 }
 
 
@@ -635,6 +640,20 @@ def run_sequence(args, targets: list[str]):
     (args.out_dir / "history.json").write_text(json.dumps(history, indent=2))
     (args.out_dir / "classes.json").write_text(json.dumps({
         "document_type": doctype_classes, "layout_type": layout_classes, "functional_category": functional_classes,
+    }, indent=2))
+    # Everything predict.py needs to reconstruct this exact architecture -
+    # unfreeze/lr/epochs etc. don't matter once training is done, only what
+    # defines the model's shape does.
+    (args.out_dir / "model_config.json").write_text(json.dumps({
+        "modality": args.modality,
+        "image_backbone": args.image_backbone,
+        "text_backbone": args.text_backbone if multimodal else None,
+        "image_size": args.image_size,
+        "max_text_length": args.max_text_length,
+        "project_to": args.project_to,
+        "n_heads": args.n_heads,
+        "n_layers": args.n_layers,
+        "embed_dim": embedder.embed_dim,
     }, indent=2))
 
     class_lists = {"doctype": doctype_classes, "layout": layout_classes, "functional": functional_classes}
