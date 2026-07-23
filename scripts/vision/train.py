@@ -103,6 +103,11 @@ PRESETS = {
 # doesn't have this joint-optimization issue, so its defaults are untouched.
 SEQUENCE_MODE_OVERRIDES = {
     "efficient": dict(unfreeze_image_blocks=0, unfreeze_text_layers=0),
+    # DiT-large's 1024-dim embedding overparameterizes SequenceContextModel's
+    # heads against a PDF-level training set this small - confirmed directly
+    # (reproduced the collapse, then fixed it by projecting down to 384,
+    # matching efficient's DINOv2-small dimensionality).
+    "quality": dict(project_to=384),
 }
 
 
@@ -334,7 +339,8 @@ def run_page(args, target_column: str):
             augment_strength=args.augment_strength, seed=args.seed,
         )
         model = BackboneClassifier(
-            args.image_backbone, len(classes), unfreeze_last_n_blocks=args.unfreeze_image_blocks, device=device
+            args.image_backbone, len(classes), unfreeze_last_n_blocks=args.unfreeze_image_blocks, device=device,
+            gradient_checkpointing=args.gradient_checkpointing, project_to=args.project_to,
         ).to(device)
         forward_fn = make_vision_forward(model, device)
     else:
@@ -349,6 +355,7 @@ def run_page(args, target_column: str):
             args.image_backbone, len(classes), text_backbone=args.text_backbone,
             unfreeze_image_blocks=args.unfreeze_image_blocks, unfreeze_text_layers=args.unfreeze_text_layers,
             max_text_length=args.max_text_length, project_to=args.project_to, device=device,
+            gradient_checkpointing=args.gradient_checkpointing,
         ).to(device)
         forward_fn = make_multimodal_forward(model, device)
 
@@ -502,7 +509,8 @@ def run_sequence(args, targets: list[str]):
 
     def make_dataset(split: str, train: bool) -> PageSequenceDataset:
         return PageSequenceDataset(
-            manifest, split, args.image_root, build_transforms(args.image_size, train=train),
+            manifest, split, args.image_root,
+            build_transforms(args.image_size, train=train, augment_strength=args.augment_strength),
             doctype_classes, layout_classes, functional_classes,
             pdf_col=args.pdf_col, page_col=args.page_col, image_col=args.image_col,
             doctype_col=args.doctype_col, layout_col=args.layout_col, functional_col=args.functional_col,
@@ -541,17 +549,23 @@ def run_sequence(args, targets: list[str]):
             image_backbone=args.image_backbone, text_backbone=args.text_backbone,
             unfreeze_image_blocks=args.unfreeze_image_blocks, unfreeze_text_layers=args.unfreeze_text_layers,
             max_text_length=args.max_text_length, project_to=args.project_to, device=device,
+            gradient_checkpointing=args.gradient_checkpointing,
         ).to(device)
     else:
         embedder = PageEmbedder(
-            args.image_backbone, unfreeze_last_n_blocks=args.unfreeze_image_blocks, device=device
+            args.image_backbone, unfreeze_last_n_blocks=args.unfreeze_image_blocks, device=device,
+            gradient_checkpointing=args.gradient_checkpointing, project_to=args.project_to,
         ).to(device)
 
     seq_model = SequenceContextModel(
         embed_dim=embedder.embed_dim, num_doctype=len(doctype_classes), num_layout=len(layout_classes),
         num_functional=len(functional_classes), n_heads=args.n_heads, n_layers=args.n_layers,
     ).to(device)
-    print(trainable_parameter_summary(embedder))
+    # Reported separately since a frozen backbone (0% here) is expected and
+    # correct, not a sign nothing is training - the Transformer encoder and
+    # four heads in seq_model are trained regardless of the backbone setting.
+    print(f"backbone: {trainable_parameter_summary(embedder)}")
+    print(f"sequence model: {trainable_parameter_summary(seq_model)}")
 
     embedder_params = [p for p in embedder.parameters() if p.requires_grad]
     seq_params = list(seq_model.parameters())
@@ -730,6 +744,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--text-backbone", default=None)
     parser.add_argument("--unfreeze-image-blocks", type=int, default=None)
     parser.add_argument("--unfreeze-text-layers", type=int, default=None)
+    parser.add_argument("--gradient-checkpointing", action="store_true",
+                         help="trade compute for memory on any unfrozen backbone blocks (no effect when "
+                              "--unfreeze-*-blocks/layers is 0 - a frozen backbone already retains no "
+                              "activations for backward). Off by default since it costs ~20-30%% more compute.")
     parser.add_argument("--image-size", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None, help="pages per batch (page mode) or PDFs per batch (sequence mode)")
     parser.add_argument("--max-pages-per-batch", type=int, default=None,
@@ -747,7 +765,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--n-heads", type=int, default=None, help="sequence mode only")
     parser.add_argument("--n-layers", type=int, default=None, help="sequence mode only")
     parser.add_argument("--project-to", type=int, default=None,
-                         help="multimodal only: project the fused embedding to this size (default: no projection)")
+                         help="project the embedding down to this size before it reaches the classifier "
+                              "head(s) (or, in --modality multimodal, before the fused image+text vector "
+                              "reaches them). Matters most in --mode sequence with a large-embed_dim backbone "
+                              "(e.g. DiT-large, 1024-dim): SequenceContextModel's heads scale with embed_dim, "
+                              "so a big backbone can badly overparameterize them against a typically tiny "
+                              "PDF-level training set and collapse training onto predicting the label's "
+                              "marginal frequency regardless of the page. Default: no projection.")
 
     # Manifest column names (defaults match this project's real annotation schema)
     parser.add_argument("--pdf-col", default="pdf_name")
@@ -757,7 +781,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--doctype-col", default="document_type")
     parser.add_argument("--layout-col", default="layout_type")
     parser.add_argument("--functional-col", default="functional_category")
-    parser.add_argument("--start-col", default="start_page")
+    parser.add_argument("--start-col", default="page_start")
     parser.add_argument("--split-col", default="split")
 
     parser.add_argument("--amp", choices=["auto", "on", "off"], default="auto",

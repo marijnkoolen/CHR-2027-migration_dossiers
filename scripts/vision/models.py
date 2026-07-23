@@ -59,7 +59,9 @@ def _attn_implementation_kwargs(device: torch.device | None) -> dict:
     return {}
 
 
-def _freeze_all_but_last_n(backbone: nn.Module, unfreeze_last_n: int) -> None:
+def _freeze_all_but_last_n(
+    backbone: nn.Module, unfreeze_last_n: int, gradient_checkpointing: bool = False
+) -> None:
     for p in backbone.parameters():
         p.requires_grad = False
     if unfreeze_last_n > 0:
@@ -67,17 +69,37 @@ def _freeze_all_but_last_n(backbone: nn.Module, unfreeze_last_n: int) -> None:
         for block in blocks[-unfreeze_last_n:]:
             for p in block.parameters():
                 p.requires_grad = True
+        # Only useful (and only takes effect) when something is actually
+        # unfrozen: a fully frozen backbone builds no backward graph through
+        # itself at all (no output here requires grad, so autograd already
+        # skips retaining its activations) - checkpointing has nothing to
+        # save memory on there, it would just recompute forward for nothing.
+        if gradient_checkpointing:
+            backbone.gradient_checkpointing_enable()
 
 
 class PageEmbedder(nn.Module):
     """Pretrained ViT-style backbone -> single embedding per image, with a
     configurable number of trailing transformer blocks left trainable
-    (0 = frozen, linear-probe style)."""
+    (0 = frozen, linear-probe style).
 
-    def __init__(self, backbone_name: str, unfreeze_last_n_blocks: int = 0, device: torch.device | None = None):
+    project_to: optionally project the backbone's native embedding down to a
+    smaller size. Matters most for sequence mode: SequenceContextModel's
+    heads scale with embed_dim (doc_in = embed_dim*2), so a 1024-dim backbone
+    (DiT-large) gives it ~7x the parameters a 384-dim one (DINOv2-small)
+    would - badly overparameterized against a PDF-level training set that's
+    typically just a few dozen documents, which in practice collapses
+    training onto the trivial "predict the label's marginal frequency,
+    ignore the page" solution regardless of learning rate or model depth.
+    Projecting down to something in DINOv2-small's range (e.g. 384) before
+    the sequence model fixes this without giving up the larger backbone's
+    features entirely."""
+
+    def __init__(self, backbone_name: str, unfreeze_last_n_blocks: int = 0, device: torch.device | None = None,
+                 gradient_checkpointing: bool = False, project_to: int | None = None):
         super().__init__()
         self.backbone = AutoModel.from_pretrained(backbone_name, **_attn_implementation_kwargs(device))
-        self.embed_dim = self.backbone.config.hidden_size
+        backbone_dim = self.backbone.config.hidden_size
         # Some backbones (Beit/DiT) need an explicit flag to interpolate their
         # position embeddings for input sizes other than the pretraining
         # resolution; others (Dinov2) handle arbitrary sizes automatically.
@@ -93,23 +115,31 @@ class PageEmbedder(nn.Module):
         # downstream LayerNorms/losses). Dinov2 and plain ViT checkpoints
         # don't set this flag and use [CLS] as intended.
         self._use_pooler = bool(getattr(self.backbone.config, "use_mean_pooling", False))
-        _freeze_all_but_last_n(self.backbone, unfreeze_last_n_blocks)
+        _freeze_all_but_last_n(self.backbone, unfreeze_last_n_blocks, gradient_checkpointing)
+
+        if project_to:
+            self.projection = nn.Sequential(nn.LayerNorm(backbone_dim), nn.Linear(backbone_dim, project_to), nn.GELU())
+            self.embed_dim = project_to
+        else:
+            self.projection = nn.Identity()
+            self.embed_dim = backbone_dim
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         kwargs = {"interpolate_pos_encoding": True} if self._supports_pos_interp else {}
         outputs = self.backbone(pixel_values=pixel_values, **kwargs)
-        if self._use_pooler:
-            return outputs.pooler_output
-        return outputs.last_hidden_state[:, 0]
+        cls = outputs.pooler_output if self._use_pooler else outputs.last_hidden_state[:, 0]
+        return self.projection(cls)
 
 
 class BackboneClassifier(nn.Module):
     """A PageEmbedder + linear head, for plain single-image classification."""
 
     def __init__(self, backbone_name: str, num_classes: int, unfreeze_last_n_blocks: int = 0,
-                 device: torch.device | None = None):
+                 device: torch.device | None = None, gradient_checkpointing: bool = False,
+                 project_to: int | None = None):
         super().__init__()
-        self.embedder = PageEmbedder(backbone_name, unfreeze_last_n_blocks, device=device)
+        self.embedder = PageEmbedder(backbone_name, unfreeze_last_n_blocks, device=device,
+                                      gradient_checkpointing=gradient_checkpointing, project_to=project_to)
         self.head = nn.Sequential(nn.LayerNorm(self.embedder.embed_dim), nn.Linear(self.embedder.embed_dim, num_classes))
 
     @property
@@ -127,13 +157,13 @@ class TextEmbedder(nn.Module):
     backbone is frozen or only lightly fine-tuned)."""
 
     def __init__(self, backbone_name: str = "xlm-roberta-base", unfreeze_last_n_layers: int = 0,
-                 max_length: int = 256, device: torch.device | None = None):
+                 max_length: int = 256, device: torch.device | None = None, gradient_checkpointing: bool = False):
         super().__init__()
         self.tokenizer = AutoTokenizer.from_pretrained(backbone_name)
         self.backbone = AutoModel.from_pretrained(backbone_name, **_attn_implementation_kwargs(device))
         self.embed_dim = self.backbone.config.hidden_size
         self.max_length = max_length
-        _freeze_all_but_last_n(self.backbone, unfreeze_last_n_layers)
+        _freeze_all_but_last_n(self.backbone, unfreeze_last_n_layers, gradient_checkpointing)
 
     def tokenize(self, texts: list[str]):
         return self.tokenizer(texts, padding=True, truncation=True, max_length=self.max_length, return_tensors="pt")
@@ -162,10 +192,13 @@ class MultimodalPageEmbedder(nn.Module):
         max_text_length: int = 256,
         project_to: int | None = None,
         device: torch.device | None = None,
+        gradient_checkpointing: bool = False,
     ):
         super().__init__()
-        self.image_embedder = PageEmbedder(image_backbone, unfreeze_image_blocks, device=device)
-        self.text_embedder = TextEmbedder(text_backbone, unfreeze_text_layers, max_text_length, device=device)
+        self.image_embedder = PageEmbedder(image_backbone, unfreeze_image_blocks, device=device,
+                                            gradient_checkpointing=gradient_checkpointing)
+        self.text_embedder = TextEmbedder(text_backbone, unfreeze_text_layers, max_text_length, device=device,
+                                           gradient_checkpointing=gradient_checkpointing)
 
         combined_dim = self.image_embedder.embed_dim + self.text_embedder.embed_dim
         if project_to:
@@ -194,11 +227,12 @@ class MultimodalBackboneClassifier(nn.Module):
         max_text_length: int = 256,
         project_to: int | None = None,
         device: torch.device | None = None,
+        gradient_checkpointing: bool = False,
     ):
         super().__init__()
         self.embedder = MultimodalPageEmbedder(
             image_backbone, text_backbone, unfreeze_image_blocks, unfreeze_text_layers, max_text_length, project_to,
-            device=device,
+            device=device, gradient_checkpointing=gradient_checkpointing,
         )
         self.head = nn.Sequential(nn.LayerNorm(self.embedder.embed_dim), nn.Linear(self.embedder.embed_dim, num_classes))
 
