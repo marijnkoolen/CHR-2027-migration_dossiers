@@ -14,6 +14,15 @@ from torchvision import transforms
 from torchvision.datasets.folder import default_loader
 
 
+def format_confusion_matrix(matrix: list[list[int]], labels: list[str]) -> str:
+    """A readable aligned text grid (true label = row, predicted = column).
+    Can get wide for many classes, but that's inherent to confusion
+    matrices - fine once redirected to a file."""
+    df = pd.DataFrame(matrix, index=labels, columns=labels)
+    df.index.name = "true \\ pred"
+    return df.to_string()
+
+
 def pick_device(prefer: str | None = None) -> torch.device:
     if prefer:
         return torch.device(prefer)

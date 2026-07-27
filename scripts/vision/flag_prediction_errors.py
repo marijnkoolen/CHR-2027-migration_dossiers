@@ -103,7 +103,7 @@ def main():
     parser.add_argument("--gt-doctype-col", default="document_type")
     parser.add_argument("--gt-layout-col", default="layout_type")
     parser.add_argument("--gt-functional-col", default="functional_category")
-    parser.add_argument("--gt-start-col", default="page_start")
+    parser.add_argument("--gt-start-col", default="start_page")
     parser.add_argument("--pred-pdf-col", default="pdf_name", help="pdf-id column name in --predictions (i.e. "
                          "whatever --pdf-col was passed to predict.py for the new manifest)")
     parser.add_argument("--pred-page-col", default="page_num")

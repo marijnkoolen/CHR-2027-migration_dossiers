@@ -7,15 +7,32 @@ text), page labels, and an anonymized per-PDF identifier (real ids in this
 project are archival filenames that embed real people's surnames - never
 written to either output file).
 
-Run this once on the machine with access to the real images/PageXML, then
-copy the two output files into this project - nothing else is needed to
-reproduce/debug the sequence-context model's behaviour on the real label
-distribution and document-length structure.
+Run this once (with access to the real images/PageXML), then train.py
+--mode sequence --cached-embeddings <out-dir> trains directly from the
+result - the backbone forward pass (the dominant per-epoch cost when
+training on raw images) never needs to run again, since sequence mode
+always freezes the backbone anyway (see SEQUENCE_MODE_OVERRIDES in
+train.py).
 
 The backbone is always used frozen (no gradient, eval mode): this captures
 exactly the input the sequence-context model receives at the very start of
 training, which is what matters for debugging its architecture and data
 pipeline in isolation from backbone fine-tuning.
+
+--augment-passes N additionally embeds N randomly-augmented copies of each
+TRAINING-split PDF (val/test always stay on the single deterministic pass,
+since they need to be reproducible for evaluation). Each pass becomes its
+own virtual PDF (pdf_id suffixed _augK, same pages/labels), so a later
+--cached-embeddings run sees more distinct document sequences without ever
+touching a raw image again. These copies are fixed once, then reused
+identically across every epoch of that later run - unlike live per-epoch
+augmentation, N is not capped by --epochs (a run still cycles through all
+N+1 copies every epoch, regardless of N). The real tradeoffs are elsewhere:
+higher N costs more disk and more compute per epoch (~linearly), for
+diminishing marginal benefit once N starts covering most of what the
+transform's rotation/crop/color-jitter ranges can actually produce - beyond
+that, extra passes increasingly resemble ones already in the cache. A
+handful (3-8) is a reasonable starting range.
 
 Usage:
     python scripts/vision/precompute_embeddings.py \\
@@ -50,11 +67,42 @@ from models import MultimodalPageEmbedder, PageEmbedder
 from pagexml import extract_text
 
 
-def anonymize_pdf_ids(pdf_values: pd.Series) -> pd.Series:
-    """Deterministic, order-preserving pdf-id -> pdf_00001-style id."""
+def build_pdf_id_mapping(pdf_values: pd.Series) -> dict:
+    """Deterministic, order-preserving real-pdf-id -> pdf_00001-style id.
+    Exposed as a dict (not applied directly) so augmented passes can reuse
+    the exact same mapping as the base pass - each PDF's augmented copies
+    then share its anonymized base id (just _augK-suffixed), rather than
+    each pass computing its own independent, inconsistent numbering."""
     unique_ids = pdf_values.drop_duplicates().tolist()
-    mapping = {real: f"pdf_{i:05d}" for i, real in enumerate(unique_ids)}
-    return pdf_values.map(mapping)
+    return {real: f"pdf_{i:05d}" for i, real in enumerate(unique_ids)}
+
+
+def embed_rows(rows: pd.DataFrame, transform, embedder, args, device: torch.device,
+                image_root: Path, label: str) -> np.ndarray:
+    n = len(rows)
+    embeddings = np.zeros((n, embedder.embed_dim), dtype=np.float32)
+    with torch.no_grad():
+        for start in range(0, n, args.batch_size):
+            batch = rows.iloc[start : start + args.batch_size]
+            images = torch.stack(
+                [transform(default_loader(str(image_root / p))) for p in batch[args.image_col]]
+            ).to(device)
+
+            if args.modality == "vision":
+                out = embedder(images)
+            else:
+                texts = [
+                    extract_text(str(image_root / p)) if pd.notna(p) else "" for p in batch[args.pagexml_col]
+                ]
+                encoded = embedder.text_embedder.tokenizer(
+                    texts, padding=True, truncation=True, max_length=args.max_text_length, return_tensors="pt"
+                )
+                out = embedder(images, encoded["input_ids"].to(device), encoded["attention_mask"].to(device))
+
+            embeddings[start : start + len(batch)] = out.cpu().numpy()
+            if (start // args.batch_size) % 20 == 0:
+                print(f"  [{label}] {start + len(batch)}/{n}")
+    return embeddings
 
 
 def main():
@@ -75,8 +123,12 @@ def main():
     parser.add_argument("--doctype-col", default="document_type")
     parser.add_argument("--layout-col", default="layout_type")
     parser.add_argument("--functional-col", default="functional_category")
-    parser.add_argument("--start-col", default="page_start")
+    parser.add_argument("--start-col", default="start_page")
     parser.add_argument("--split-col", default="split")
+    parser.add_argument("--augment-passes", type=int, default=0,
+                         help="also embed N randomly-augmented copies of each split=='train' PDF, each as its "
+                              "own virtual PDF (pdf_id suffixed _augK) - see module docstring. 0 = off (default).")
+    parser.add_argument("--augment-strength", choices=["moderate", "strong"], default="moderate")
     parser.add_argument("--device", default=None)
     args = parser.parse_args()
 
@@ -97,51 +149,49 @@ def main():
         ).to(device)
     embedder.eval()
 
-    transform = build_transforms(args.image_size, train=False)
+    eval_transform = build_transforms(args.image_size, train=False)
     image_root = Path(args.image_root)
-    all_embeddings = np.zeros((n, embedder.embed_dim), dtype=np.float32)
+    pdf_id_mapping = build_pdf_id_mapping(manifest[args.pdf_col])
 
-    with torch.no_grad():
-        for start in range(0, n, args.batch_size):
-            rows = manifest.iloc[start : start + args.batch_size]
-            images = torch.stack(
-                [transform(default_loader(str(image_root / p))) for p in rows[args.image_col]]
-            ).to(device)
+    def export_rows(rows: pd.DataFrame, pdf_ids: pd.Series) -> pd.DataFrame:
+        return pd.DataFrame({
+            "pdf_id": pdf_ids,
+            "page_number": rows[args.page_col],
+            "split": rows[args.split_col] if args.split_col in rows.columns else "unassigned",
+            "start_page": rows[args.start_col],
+            "document_type": rows[args.doctype_col],
+            "layout_type": rows[args.layout_col],
+            "functional_category": rows[args.functional_col],
+        })
 
-            if args.modality == "vision":
-                out = embedder(images)
-            else:
-                texts = [
-                    extract_text(str(image_root / p)) if pd.notna(p) else "" for p in rows[args.pagexml_col]
-                ]
-                encoded = embedder.text_embedder.tokenizer(
-                    texts, padding=True, truncation=True, max_length=args.max_text_length, return_tensors="pt"
-                )
-                out = embedder(images, encoded["input_ids"].to(device), encoded["attention_mask"].to(device))
+    all_embeddings = [embed_rows(manifest, eval_transform, embedder, args, device, image_root, "base")]
+    all_export = [export_rows(manifest, manifest[args.pdf_col].map(pdf_id_mapping))]
 
-            all_embeddings[start : start + len(rows)] = out.cpu().numpy()
-            if (start // args.batch_size) % 20 == 0:
-                print(f"  {start + len(rows)}/{n}")
+    if args.augment_passes > 0:
+        train_rows = manifest[manifest[args.split_col] == "train"] if args.split_col in manifest.columns else manifest.iloc[0:0]
+        if train_rows.empty:
+            print(f"--augment-passes {args.augment_passes} requested but no rows have "
+                  f"{args.split_col}=='train' - skipping.")
+        else:
+            train_transform = build_transforms(args.image_size, train=True, augment_strength=args.augment_strength)
+            train_pdf_ids = train_rows[args.pdf_col].map(pdf_id_mapping)
+            for pass_idx in range(1, args.augment_passes + 1):
+                label = f"aug {pass_idx}/{args.augment_passes}"
+                all_embeddings.append(embed_rows(train_rows, train_transform, embedder, args, device, image_root, label))
+                all_export.append(export_rows(train_rows, train_pdf_ids + f"_aug{pass_idx}"))
+            print(f"added {args.augment_passes} augmented pass(es) over {train_rows[args.pdf_col].nunique()} "
+                  f"training PDFs ({len(train_rows)} pages/pass)")
+
+    all_embeddings = np.concatenate(all_embeddings, axis=0)
+    export = pd.concat(all_export, ignore_index=True)
+    export.insert(0, "row_id", range(len(export)))
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     np.save(args.out_dir / "embeddings.npy", all_embeddings)
-
-    export = pd.DataFrame(
-        {
-            "row_id": range(n),
-            "pdf_id": anonymize_pdf_ids(manifest[args.pdf_col]),
-            "page_number": manifest[args.page_col],
-            "split": manifest[args.split_col] if args.split_col in manifest.columns else "unassigned",
-            "start_page": manifest[args.start_col],
-            "document_type": manifest[args.doctype_col],
-            "layout_type": manifest[args.layout_col],
-            "functional_category": manifest[args.functional_col],
-        }
-    )
     export.to_csv(args.out_dir / "embeddings_manifest.tsv", sep="\t", index=False)
 
     print(f"\nWrote {args.out_dir / 'embeddings.npy'} ({all_embeddings.shape}, {all_embeddings.nbytes / 1e6:.1f} MB)")
-    print(f"Wrote {args.out_dir / 'embeddings_manifest.tsv'}")
+    print(f"Wrote {args.out_dir / 'embeddings_manifest.tsv'} ({len(export)} rows, {export['pdf_id'].nunique()} PDFs)")
     print(
         "\nNeither file contains image paths, PageXML text, or original document "
         "identifiers - safe to share."

@@ -46,15 +46,16 @@ import json
 from collections import Counter
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
 from sklearn.metrics import classification_report, confusion_matrix, f1_score, precision_recall_fscore_support
 from torch.utils.data import DataLoader
 from torchvision.datasets.folder import default_loader
-from transformers import AutoTokenizer
+from transformers import AutoConfig, AutoTokenizer
 
-from common import build_dataloaders_from_manifest, build_transforms, pick_device
+from common import build_dataloaders_from_manifest, build_transforms, format_confusion_matrix, pick_device
 from models import (
     BackboneClassifier,
     MultimodalBackboneClassifier,
@@ -65,6 +66,11 @@ from models import (
 from multimodal_data import build_multimodal_dataloaders
 from sequence_data import IGNORE_INDEX, PageBudgetBatchSampler, PageSequenceDataset, build_label_vocab, make_pdf_collate_fn
 from sequence_model import SequenceContextModel
+from train_from_embeddings import EmbeddingSequenceDataset
+from train_from_embeddings import collate as collate_cached_embeddings
+from train_from_embeddings import compute_losses as compute_losses_cached_embeddings
+from train_sequence_from_embeddings import ProjectedSequenceModel
+from train_sequence_from_embeddings import evaluate as evaluate_cached_embeddings
 
 TARGET_COLUMN_ARG = {
     "document_type": "doctype_col",
@@ -171,15 +177,6 @@ def resolve_amp(args, device: torch.device) -> bool:
 
 def autocast_context(device: torch.device, enabled: bool):
     return torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=enabled)
-
-
-def format_confusion_matrix(matrix: list[list[int]], labels: list[str]) -> str:
-    """A readable aligned text grid (true label = row, predicted = column).
-    Can get wide for many classes, but that's inherent to confusion
-    matrices - fine once redirected to a file."""
-    df = pd.DataFrame(matrix, index=labels, columns=labels)
-    df.index.name = "true \\ pred"
-    return df.to_string()
 
 
 def _classification_metrics(preds: list[int], targets: list[int], classes: list[str]) -> dict:
@@ -496,7 +493,202 @@ def evaluate_sequence(embedder, seq_model, loader: DataLoader, device,
     return metrics
 
 
+def run_sequence_from_cached_embeddings(args, targets: list[str]) -> None:
+    device = pick_device(args.device)
+    print(f"device: {device}")
+    if args.max_pages_per_batch:
+        print("note: --max-pages-per-batch is ignored with --cached-embeddings (plain --batch-size is used).")
+
+    embeddings = np.load(args.cached_embeddings / "embeddings.npy")
+    manifest = pd.read_csv(args.cached_embeddings / "embeddings_manifest.tsv", sep="\t")
+    raw_dim = embeddings.shape[1]
+    # ProjectedSequenceModel always builds a real (trainable) projection
+    # layer, even when no shrinking is requested - so when --project-to is
+    # left at its default None, project_to must still resolve to a concrete
+    # number (raw_dim) here, and that same number has to be used again below
+    # when folding into a real embedder, or the two projections' shapes
+    # won't match (a real Sequential vs. the embedder's nn.Identity()).
+    project_to = args.project_to or raw_dim
+    print(f"{embeddings.shape[0]} pages, {manifest['pdf_id'].nunique()} PDFs, raw_dim={raw_dim} -> "
+          f"project_to={project_to}{' (unchanged, no shrinking requested)' if not args.project_to else ''}")
+
+    multimodal = args.modality == "multimodal"
+    # Fail fast, before spending a full training run: the embeddings' own
+    # dimensionality has to match what --image-backbone(+--text-backbone)
+    # would actually produce, or folding the trained projection into a real
+    # embedder at the end (which needs that exact shape) errors out late.
+    expected_dim = AutoConfig.from_pretrained(args.image_backbone).hidden_size
+    if multimodal:
+        expected_dim += AutoConfig.from_pretrained(args.text_backbone).hidden_size
+    if expected_dim != raw_dim:
+        backbones = args.image_backbone + (f" + {args.text_backbone}" if multimodal else "")
+        raise SystemExit(
+            f"--cached-embeddings dim ({raw_dim}) doesn't match --image-backbone/--text-backbone "
+            f"({backbones} -> {expected_dim}-dim). Pass the backbone(s) actually used by "
+            f"precompute_embeddings.py for this directory."
+        )
+
+    doctype_classes = build_label_vocab(manifest, "split", "document_type")
+    layout_classes = build_label_vocab(manifest, "split", "layout_type")
+    functional_classes = build_label_vocab(manifest, "split", "functional_category")
+    print(f"{len(doctype_classes)} doctype classes, {len(layout_classes)} layout classes, "
+          f"{len(functional_classes)} functional classes")
+
+    def make_ds(split: str) -> EmbeddingSequenceDataset:
+        return EmbeddingSequenceDataset(embeddings, manifest, split, doctype_classes, layout_classes, functional_classes)
+
+    train_ds, val_ds, test_ds = make_ds("train"), make_ds("val"), make_ds("test")
+    print(f"{len(train_ds)} train PDFs, {len(val_ds)} val PDFs, {len(test_ds)} test PDFs")
+
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate_cached_embeddings)
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate_cached_embeddings)
+    test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate_cached_embeddings)
+
+    train_rows = manifest[manifest["split"] == "train"]
+    n_pos = (train_rows["start_page"].astype(str).str.strip().str.lower() == "yes").sum()
+    n_total = len(train_rows)
+    start_pos_weight = max(1.0, (n_total - n_pos) / max(1, n_pos))
+    print(f"start-page positive rate: {n_pos / max(1, n_total):.2f} (pos_weight={start_pos_weight:.2f})")
+
+    model = ProjectedSequenceModel(
+        raw_dim, project_to, len(doctype_classes), len(layout_classes), len(functional_classes),
+        args.n_heads, args.n_layers,
+    ).to(device)
+    print(f"sequence model (+ projection): {trainable_parameter_summary(model)}")
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+
+    best_metric, best_state = -1.0, None
+    history = []
+    for epoch in range(1, args.epochs + 1):
+        model.train()
+        running = {"total": 0.0, "start": 0.0, "doctype": 0.0, "layout": 0.0, "functional": 0.0}
+        n_batches = 0
+        for batch in train_loader:
+            embeddings_batch = batch["embeddings"].to(device)
+            padding_mask = batch["padding_mask"].to(device)
+            out = model(embeddings_batch, padding_mask, true_start_page=batch["start"].to(device))
+            losses = compute_losses_cached_embeddings(out, batch, device, start_pos_weight)
+
+            optimizer.zero_grad()
+            losses["total"].backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+
+            for k in running:
+                running[k] += losses[k].item()
+            n_batches += 1
+        scheduler.step()
+        avg = {k: v / max(1, n_batches) for k, v in running.items()}
+
+        val_metrics = evaluate_cached_embeddings(model, val_loader, device)
+        tracked = sum(val_metrics[TARGET_METRIC_KEY[t]] for t in targets)
+        print(
+            f"epoch {epoch:>3}/{args.epochs}  loss={avg['total']:.3f} "
+            f"(start={avg['start']:.3f} doctype={avg['doctype']:.3f} layout={avg['layout']:.3f} "
+            f"functional={avg['functional']:.3f})  "
+            f"val: start_f1={val_metrics['start_f1']:.3f} doctype_f1={val_metrics['doctype_macro_f1']:.3f} "
+            f"layout_f1={val_metrics['layout_macro_f1']:.3f} functional_f1={val_metrics['functional_macro_f1']:.3f}"
+            f"  [tracked ({'+'.join(targets)})={tracked:.3f}]"
+        )
+        history.append({
+            "epoch": epoch,
+            "train_loss": avg["total"], "train_loss_start": avg["start"], "train_loss_doctype": avg["doctype"],
+            "train_loss_layout": avg["layout"], "train_loss_functional": avg["functional"],
+            **{f"val_{k}": v for k, v in val_metrics.items()},
+            "tracked": tracked,
+        })
+        if tracked > best_metric:
+            best_metric = tracked
+            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+
+    (args.out_dir / "history.json").write_text(json.dumps(history, indent=2))
+    (args.out_dir / "classes.json").write_text(json.dumps({
+        "document_type": doctype_classes, "layout_type": layout_classes, "functional_category": functional_classes,
+    }, indent=2))
+
+    # Fold the trained projection into a real, freshly-loaded embedder (its
+    # backbone weights are exactly the pretrained checkpoint - unchanged,
+    # since sequence mode always freezes it) so sequence_model.pt is a
+    # self-contained checkpoint predict.py can load exactly like one from a
+    # non-cached run.
+    if multimodal:
+        embedder = MultimodalPageEmbedder(
+            args.image_backbone, args.text_backbone, max_text_length=args.max_text_length,
+            project_to=project_to, device=device,
+        ).to(device)
+    else:
+        embedder = PageEmbedder(args.image_backbone, project_to=project_to, device=device).to(device)
+    embedder.projection.load_state_dict(model.projection.state_dict())
+
+    torch.save({"embedder": embedder.state_dict(), "seq_model": model.seq_model.state_dict()},
+               args.out_dir / "sequence_model.pt")
+    (args.out_dir / "model_config.json").write_text(json.dumps({
+        "modality": args.modality,
+        "image_backbone": args.image_backbone,
+        "text_backbone": args.text_backbone if multimodal else None,
+        "image_size": args.image_size,
+        "max_text_length": args.max_text_length,
+        "project_to": project_to,
+        "n_heads": args.n_heads,
+        "n_layers": args.n_layers,
+        "embed_dim": embedder.embed_dim,
+    }, indent=2))
+
+    class_lists = {"doctype": doctype_classes, "layout": layout_classes, "functional": functional_classes}
+
+    train_eval_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate_cached_embeddings)
+    train_metrics = evaluate_cached_embeddings(model, train_eval_loader, device, classes=class_lists)
+    print("\ntrain-set metrics:")
+    train_report_lines = ["train-set (self-predicted segmentation) metrics:", ""]
+    for key in ["start_precision", "start_recall", "start_f1", "doctype_accuracy", "doctype_macro_f1",
+                "layout_accuracy", "layout_macro_f1", "functional_accuracy", "functional_macro_f1"]:
+        print(f"  {key}: {train_metrics[key]:.3f}")
+        train_report_lines.append(f"{key}: {train_metrics[key]:.3f}")
+    for key in ("start_report", "doctype_report", "layout_report", "functional_report"):
+        if key in train_metrics:
+            train_report_lines.append(f"\n--- {key} ---\n{train_metrics[key]}")
+    (args.out_dir / "train_set_report.txt").write_text("\n".join(train_report_lines))
+
+    test_metrics = evaluate_cached_embeddings(model, test_loader, device, classes=class_lists)
+    print(f"\ntest metrics (tracked targets: {', '.join(targets)}):")
+    report_lines = [f"tracked targets: {', '.join(targets)}", ""]
+    for k, v in test_metrics.items():
+        if k.endswith("_report") or k.endswith("_confusion_matrix"):
+            continue
+        print(f"  {k}: {v:.3f}")
+        report_lines.append(f"{k}: {v:.3f}")
+    for k, v in test_metrics.items():
+        if k.endswith("_report"):
+            report_lines.append(f"\n--- {k} ---\n{v}")
+    (args.out_dir / "test_report.txt").write_text("\n".join(report_lines))
+
+    cm_json = {"start_page": {"labels": ["not_start_page", "start_page"],
+                               "matrix": test_metrics["start_confusion_matrix"]}}
+    cm_text = [f"--- start_page ---\n{format_confusion_matrix(test_metrics['start_confusion_matrix'], ['not_start_page', 'start_page'])}"]
+    target_names = {"doctype": "document_type", "layout": "layout_type", "functional": "functional_category"}
+    for key, labels in class_lists.items():
+        matrix = test_metrics.get(f"{key}_confusion_matrix")
+        if matrix is None:
+            continue
+        cm_json[target_names[key]] = {"labels": labels, "matrix": matrix}
+        cm_text.append(f"--- {target_names[key]} ---\n{format_confusion_matrix(matrix, labels)}")
+    (args.out_dir / "confusion_matrices.json").write_text(json.dumps(cm_json, indent=2))
+    (args.out_dir / "confusion_matrices.txt").write_text("\n\n".join(cm_text))
+
+    print(f"\nWrote sequence_model.pt, model_config.json, classes.json, history.json, train_set_report.txt, "
+          f"test_report.txt, confusion_matrices.{{json,txt}} to {args.out_dir}")
+
+
 def run_sequence(args, targets: list[str]):
+    if args.cached_embeddings:
+        return run_sequence_from_cached_embeddings(args, targets)
+
     device = pick_device(args.device)
     amp = resolve_amp(args, device)
     print(f"device: {device}  amp(bf16): {amp}")
@@ -744,8 +936,20 @@ def run_sequence(args, targets: list[str]):
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--manifest", type=Path, required=True)
+    parser.add_argument("--manifest", type=Path, default=None,
+                         help="required unless --cached-embeddings is set (--mode sequence only)")
     parser.add_argument("--image-root", type=Path, default=Path(""))
+    parser.add_argument("--cached-embeddings", type=Path, default=None,
+                         help="--mode sequence only: train directly from a precompute_embeddings.py output "
+                              "directory (embeddings.npy + embeddings_manifest.tsv) instead of raw images/"
+                              "PageXML. Sequence mode always freezes the backbone (SEQUENCE_MODE_OVERRIDES), "
+                              "so its forward pass never needs gradients - recomputing it fresh every epoch "
+                              "from raw images is pure overhead; this skips straight to training the "
+                              "projection + SequenceContextModel on the cached vectors, then folds the "
+                              "trained projection into a real embedder so the saved checkpoint is identical "
+                              "in shape to one produced without this flag. --manifest/--image-root and the "
+                              "raw *-col flags are ignored when this is set; --max-pages-per-batch isn't "
+                              "supported here (embeddings are tiny - a fixed --batch-size is enough).")
     parser.add_argument("--out-dir", type=Path, default=None,
                          help="default: runs/<scenario>_<mode>_<modality>_<target>")
 
@@ -843,6 +1047,11 @@ def main():
         args.out_dir = Path("runs") / f"{args.scenario}_{args.mode}_{args.modality}_{'+'.join(targets)}"
 
     print(f"scenario={args.scenario}  mode={args.mode}  modality={args.modality}  target={targets}")
+
+    if args.cached_embeddings and args.mode != "sequence":
+        raise SystemExit("--cached-embeddings only applies to --mode sequence.")
+    if args.manifest is None and args.cached_embeddings is None:
+        raise SystemExit("--manifest is required (unless --cached-embeddings is set, --mode sequence only).")
 
     if args.mode == "page":
         if args.max_pages_per_batch:
