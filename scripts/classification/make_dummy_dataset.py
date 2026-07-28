@@ -16,7 +16,7 @@ Dutch/mixed filler text - see train_multimodal.py), plus a flat manifest.tsv
 with (image, pagexml, split, label, archetype).
 
 Usage:
-    python scripts/vision/make_dummy_dataset.py --out-dir data/dummy_images --scale 0.3
+    python scripts/classification/make_dummy_dataset.py --out-dir data/dummy_images --scale 0.3
 """
 
 from __future__ import annotations

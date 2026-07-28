@@ -35,7 +35,7 @@ detector's own precision is reported alongside instead of folding that into
 either composite metric.
 
 Usage:
-    python scripts/vision/eval_document_level_from_embeddings.py \\
+    python scripts/classification/eval_document_level_from_embeddings.py \\
         --embeddings data/embeddings_vision/embeddings.npy \\
         --manifest data/embeddings_vision/embeddings_manifest.tsv
 """
@@ -43,6 +43,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -52,6 +53,8 @@ import torch.nn.functional as F
 from sklearn.metrics import f1_score, precision_recall_fscore_support
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
+
+sys.path.insert(0, str(Path(__file__).parent / "lib"))
 
 from common import pick_device
 

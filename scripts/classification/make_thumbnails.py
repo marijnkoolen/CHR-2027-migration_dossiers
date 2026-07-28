@@ -10,8 +10,8 @@ Skips a thumbnail if it already exists and is newer than its source image,
 so re-running after adding a few new dossiers only processes what's new.
 
 Usage:
-    python scripts/vision/make_thumbnails.py
-    python scripts/vision/make_thumbnails.py --size 192 --images-dir data/images --thumbs-dir data/thumbs
+    python scripts/classification/make_thumbnails.py
+    python scripts/classification/make_thumbnails.py --size 192 --images-dir data/images --thumbs-dir data/thumbs
 """
 
 from __future__ import annotations

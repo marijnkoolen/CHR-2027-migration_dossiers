@@ -13,7 +13,7 @@ truth here), and predicted_segment_id groups pages into predicted documents
 (`<pdf_id>::seg<n>`) - the unit flag_prediction_errors.py operates on.
 
 Usage:
-    python scripts/vision/predict.py \\
+    python scripts/classification/predict.py \\
         --run-dir runs/quality_sequence_multimodal_start_page+document_type+layout_type+functional_category \\
         --manifest new_corpus_manifest.tsv --image-root <root> --out predictions.tsv
 """
@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -31,8 +32,10 @@ from torch.utils.data import DataLoader, Dataset
 from torchvision.datasets.folder import default_loader
 from transformers import AutoTokenizer
 
+sys.path.insert(0, str(Path(__file__).parent / "lib"))
+
 from common import build_transforms, pick_device
-from models import MultimodalPageEmbedder, PageEmbedder
+from models import MultimodalPageEmbedder, PageEmbedder, TextEmbedder
 from pagexml import extract_text
 from sequence_data import PageBudgetBatchSampler
 from sequence_model import SequenceContextModel
@@ -42,10 +45,12 @@ class InferencePageSequenceDataset(Dataset):
     """Like sequence_data.PageSequenceDataset, but for unlabeled data: groups
     pages by PDF (ordered by page number), with no label columns at all -
     __getitem__ also hands back the manifest rows themselves so predictions
-    can be written out alongside every original column."""
+    can be written out alongside every original column.
+
+    image_col=None (text-only models): no image is ever loaded."""
 
     def __init__(self, manifest: pd.DataFrame, image_root: Path, transform,
-                 pdf_col: str, page_col: str, image_col: str, pagexml_col: str | None = None):
+                 pdf_col: str, page_col: str, image_col: str | None, pagexml_col: str | None = None):
         self.image_root = Path(image_root)
         self.transform = transform
         self.image_col = image_col
@@ -70,23 +75,26 @@ class InferencePageSequenceDataset(Dataset):
 
     def __getitem__(self, idx: int):
         group = self.pdfs[idx]
-        paths = [str(self.image_root / p) for p in group[self.image_col]]
-        images = torch.stack([self.transform(default_loader(p)) for p in paths])
+        if self.image_col:
+            paths = [str(self.image_root / p) for p in group[self.image_col]]
+            images = torch.stack([self.transform(default_loader(p)) for p in paths])
+        else:
+            images = None
         if self.pagexml_col:
             texts = [
                 self._text_for(str(self.image_root / p)) if pd.notna(p) else "" for p in group[self.pagexml_col]
             ]
         else:
-            texts = [""] * len(paths)
+            texts = [""] * len(group)
         return images, texts, group
 
 
 def make_inference_collate_fn(tokenizer=None, max_text_length: int = 256):
     def collate(batch: list[tuple]):
-        lengths = [item[0].shape[0] for item in batch]
+        lengths = [len(item[2]) for item in batch]
         B, T_max = len(batch), max(lengths)
 
-        images_flat = torch.cat([item[0] for item in batch], dim=0)
+        has_images = batch[0][0] is not None
         batch_index = torch.cat([torch.full((n,), b, dtype=torch.long) for b, n in enumerate(lengths)])
         time_index = torch.cat([torch.arange(n) for n in lengths])
         padding_mask = torch.ones(B, T_max, dtype=torch.bool)
@@ -94,9 +102,11 @@ def make_inference_collate_fn(tokenizer=None, max_text_length: int = 256):
             padding_mask[b, :n] = False
 
         result = {
-            "images_flat": images_flat, "batch_index": batch_index, "time_index": time_index,
+            "batch_index": batch_index, "time_index": time_index,
             "padding_mask": padding_mask, "groups": [item[2] for item in batch],
         }
+        if has_images:
+            result["images_flat"] = torch.cat([item[0] for item in batch], dim=0)
         if tokenizer is not None:
             texts_flat = [text for _, texts, _ in batch for text in texts]
             encoded = tokenizer(
@@ -110,11 +120,14 @@ def make_inference_collate_fn(tokenizer=None, max_text_length: int = 256):
 
 
 def embed_pages(embedder, batch: dict, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
-    images = batch["images_flat"].to(device)
-    if "input_ids_flat" in batch:
-        embeds_flat = embedder(images, batch["input_ids_flat"].to(device), batch["attention_mask_flat"].to(device))
+    if "images_flat" in batch:
+        images = batch["images_flat"].to(device)
+        if "input_ids_flat" in batch:
+            embeds_flat = embedder(images, batch["input_ids_flat"].to(device), batch["attention_mask_flat"].to(device))
+        else:
+            embeds_flat = embedder(images)
     else:
-        embeds_flat = embedder(images)
+        embeds_flat = embedder(batch["input_ids_flat"].to(device), batch["attention_mask_flat"].to(device))
     B, T = batch["padding_mask"].shape
     embeddings = torch.zeros(B, T, embedder.embed_dim, device=device, dtype=embeds_flat.dtype)
     embeddings[batch["batch_index"], batch["time_index"]] = embeds_flat
@@ -191,7 +204,8 @@ def main():
     print(f"model config: {config}")
 
     multimodal = config["modality"] == "multimodal"
-    tokenizer = AutoTokenizer.from_pretrained(config["text_backbone"]) if multimodal else None
+    text_only = config["modality"] == "text"
+    tokenizer = AutoTokenizer.from_pretrained(config["text_backbone"]) if (multimodal or text_only) else None
 
     sep = "\t" if str(args.manifest).endswith(".tsv") else ","
     manifest = pd.read_csv(args.manifest, sep=sep)
@@ -199,8 +213,8 @@ def main():
 
     dataset = InferencePageSequenceDataset(
         manifest, args.image_root, build_transforms(config["image_size"], train=False),
-        pdf_col=args.pdf_col, page_col=args.page_col, image_col=args.image_col,
-        pagexml_col=args.pagexml_col if multimodal else None,
+        pdf_col=args.pdf_col, page_col=args.page_col, image_col=None if text_only else args.image_col,
+        pagexml_col=args.pagexml_col if (multimodal or text_only) else None,
     )
     collate = make_inference_collate_fn(tokenizer, config["max_text_length"])
     if args.max_pages_per_batch:
@@ -214,6 +228,11 @@ def main():
             config["image_backbone"], config["text_backbone"], max_text_length=config["max_text_length"],
             project_to=config["project_to"], device=device,
         ).to(device)
+    elif text_only:
+        embedder = TextEmbedder(
+            config["text_backbone"], max_length=config["max_text_length"], project_to=config["project_to"],
+            device=device,
+        ).to(device)
     else:
         embedder = PageEmbedder(config["image_backbone"], project_to=config["project_to"], device=device).to(device)
 
@@ -221,6 +240,7 @@ def main():
         embed_dim=config["embed_dim"], num_doctype=len(classes["document_type"]),
         num_layout=len(classes["layout_type"]), num_functional=len(classes["functional_category"]),
         n_heads=config["n_heads"], n_layers=config["n_layers"],
+        doc_classification=config.get("doc_classification", "late"),
     ).to(device)
 
     state = torch.load(args.run_dir / "sequence_model.pt", map_location=device)

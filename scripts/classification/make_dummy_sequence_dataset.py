@@ -19,7 +19,7 @@ train_sequence.py's multimodal mode, --pagexml-col pagexml) and `split`
 (assigned per PDF, not per page).
 
 Usage:
-    python scripts/vision/make_dummy_sequence_dataset.py --out-dir data/dummy_sequences
+    python scripts/classification/make_dummy_sequence_dataset.py --out-dir data/dummy_sequences
 """
 
 from __future__ import annotations

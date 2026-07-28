@@ -191,4 +191,4 @@ uv.lock
 # Scratch/exploratory notebooks and scripts accumulated during development, not part of the
 # polished package or its notebooks/demo/ -- kept local rather than published.
 /notebooks/make_migrant_ground_truth.ipynb
-
+private_urls.json

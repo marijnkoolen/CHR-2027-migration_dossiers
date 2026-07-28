@@ -14,12 +14,12 @@ live run with real images (there's no backbone in the loop here to
 fine-tune at all - the classifier head is the only thing being trained).
 
 Usage:
-    python scripts/vision/eval_page_from_embeddings.py \\
+    python scripts/classification/eval_page_from_embeddings.py \\
         --embeddings data/embeddings_vision/embeddings.npy \\
         --manifest data/embeddings_vision/embeddings_manifest.tsv
 
     # single target instead of all four:
-    python scripts/vision/eval_page_from_embeddings.py \\
+    python scripts/classification/eval_page_from_embeddings.py \\
         --embeddings data/embeddings_vision/embeddings.npy \\
         --manifest data/embeddings_vision/embeddings_manifest.tsv \\
         --target document_type
@@ -28,6 +28,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -37,6 +38,8 @@ import torch.nn.functional as F
 from sklearn.metrics import classification_report, f1_score
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
+
+sys.path.insert(0, str(Path(__file__).parent / "lib"))
 
 from common import pick_device
 

@@ -26,7 +26,7 @@ predict.py exactly as if train.py --mode sequence had produced it.
 
 Usage:
     # efficient (DINOv2-small + XLM-R-base)
-    python scripts/vision/train_sequence_from_embeddings.py \\
+    python scripts/classification/train_sequence_from_embeddings.py \\
         --embeddings ../../data/embeddings_multimodal/embeddings.npy \\
         --manifest ../../data/embeddings_multimodal/embeddings_manifest.tsv \\
         --image-backbone facebook/dinov2-small --text-backbone xlm-roberta-base \\
@@ -34,7 +34,7 @@ Usage:
         --out-dir ../../runs/sequence_multimodal_efficient
 
     # quality (DiT-large + XLM-R-large)
-    python scripts/vision/train_sequence_from_embeddings.py \\
+    python scripts/classification/train_sequence_from_embeddings.py \\
         --embeddings ../../data/embeddings_multimodal_dit/embeddings.npy \\
         --manifest ../../data/embeddings_multimodal_dit/embeddings_manifest.tsv \\
         --image-backbone microsoft/dit-large-finetuned-rvlcdip --text-backbone xlm-roberta-large \\
@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import json
 import random
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -55,6 +56,8 @@ import torch.nn.functional as F
 from sklearn.metrics import classification_report, confusion_matrix, f1_score, precision_recall_fscore_support
 from torch import nn
 from torch.utils.data import DataLoader
+
+sys.path.insert(0, str(Path(__file__).parent / "lib"))
 
 from common import format_confusion_matrix, pick_device
 from models import MultimodalPageEmbedder, PageEmbedder
@@ -74,12 +77,13 @@ class ProjectedSequenceModel(nn.Module):
     real embedder's `.projection` submodule."""
 
     def __init__(self, raw_dim: int, project_to: int, num_doctype: int, num_layout: int, num_functional: int,
-                 n_heads: int, n_layers: int):
+                 n_heads: int, n_layers: int, doc_classification: str = "late"):
         super().__init__()
         self.projection = nn.Sequential(nn.LayerNorm(raw_dim), nn.Linear(raw_dim, project_to), nn.GELU())
         self.seq_model = SequenceContextModel(
             embed_dim=project_to, num_doctype=num_doctype, num_layout=num_layout,
             num_functional=num_functional, n_heads=n_heads, n_layers=n_layers,
+            doc_classification=doc_classification,
         )
 
     def forward(self, embeddings: torch.Tensor, padding_mask: torch.Tensor, true_start_page=None) -> dict:
@@ -158,6 +162,19 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--target", nargs="+", default=["start_page", "document_type", "layout_type", "functional_category"],
                          choices=list(TARGET_METRIC_KEY), help="which head(s) determine the saved 'best' checkpoint")
+    parser.add_argument("--doc-classification", choices=["early", "late"], default="late",
+                         help="how doctype/layout/functional use document segments - see sequence_model.py's "
+                              "module docstring. 'late' (default): each page classified from its own "
+                              "contextualized state, not pooled with document-mates. 'early': segment's "
+                              "contextualized states mean-pooled first, one shared input per document.")
+    parser.add_argument("--loss-weight-start", type=float, default=1.0)
+    parser.add_argument("--loss-weight-doctype", type=float, default=1.0,
+                         help="the four task losses are summed unweighted by default - document_type's raw loss "
+                              "tends to dominate (many classes, several with only a handful of training "
+                              "examples), so downweighting it (e.g. 0.3) tests whether that dominance in the "
+                              "shared gradient is holding the other heads back.")
+    parser.add_argument("--loss-weight-layout", type=float, default=1.0)
+    parser.add_argument("--loss-weight-functional", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default=None)
     args = parser.parse_args()
@@ -194,9 +211,16 @@ def main():
     start_pos_weight = max(1.0, (n_total - n_pos) / max(1, n_pos))
     print(f"start-page positive rate: {n_pos / max(1, n_total):.2f} (pos_weight={start_pos_weight:.2f})")
 
+    loss_weights = {
+        "start": args.loss_weight_start, "doctype": args.loss_weight_doctype,
+        "layout": args.loss_weight_layout, "functional": args.loss_weight_functional,
+    }
+    if any(w != 1.0 for w in loss_weights.values()):
+        print(f"loss weights: {loss_weights}")
+
     model = ProjectedSequenceModel(
         raw_dim, args.project_to, len(doctype_classes), len(layout_classes), len(functional_classes),
-        args.n_heads, args.n_layers,
+        args.n_heads, args.n_layers, doc_classification=args.doc_classification,
     ).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
@@ -214,7 +238,7 @@ def main():
             embeddings_batch = batch["embeddings"].to(device)
             padding_mask = batch["padding_mask"].to(device)
             out = model(embeddings_batch, padding_mask, true_start_page=batch["start"].to(device))
-            losses = compute_losses(out, batch, device, start_pos_weight)
+            losses = compute_losses(out, batch, device, start_pos_weight, loss_weights=loss_weights)
 
             optimizer.zero_grad()
             losses["total"].backward()
@@ -281,6 +305,7 @@ def main():
         "project_to": args.project_to,
         "n_heads": args.n_heads,
         "n_layers": args.n_layers,
+        "doc_classification": args.doc_classification,
         "embed_dim": embedder.embed_dim,
     }, indent=2))
 

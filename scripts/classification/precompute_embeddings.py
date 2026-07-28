@@ -35,15 +35,20 @@ that, extra passes increasingly resemble ones already in the cache. A
 handful (3-8) is a reasonable starting range.
 
 Usage:
-    python scripts/vision/precompute_embeddings.py \\
+    python scripts/classification/precompute_embeddings.py \\
         --manifest <your real page-level manifest> --image-root <root> \\
         --out-dir data/embeddings --image-backbone facebook/dinov2-small
 
     # or, to reproduce the multimodal run that showed the collapse:
-    python scripts/vision/precompute_embeddings.py \\
+    python scripts/classification/precompute_embeddings.py \\
         --manifest <manifest> --image-root <root> --out-dir data/embeddings_multimodal \\
         --image-backbone facebook/dinov2-small --modality multimodal \\
-        --text-backbone xlm-roberta-base --pagexml-col <col>
+        --text-backbone bert-base-uncased --pagexml-col <col>
+
+    # or, text-only (no --image-backbone/--image-size involved at all):
+    python scripts/classification/precompute_embeddings.py \\
+        --manifest <manifest> --image-root <root> --out-dir data/embeddings_text \\
+        --modality text --text-backbone bert-base-uncased --pagexml-col <col>
 
 Writes:
     <out-dir>/embeddings.npy            (N_pages, D) float32
@@ -55,6 +60,7 @@ Writes:
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -62,8 +68,10 @@ import pandas as pd
 import torch
 from torchvision.datasets.folder import default_loader
 
+sys.path.insert(0, str(Path(__file__).parent / "lib"))
+
 from common import build_transforms, pick_device
-from models import MultimodalPageEmbedder, PageEmbedder
+from models import MultimodalPageEmbedder, PageEmbedder, TextEmbedder
 from pagexml import extract_text
 
 
@@ -81,27 +89,59 @@ def embed_rows(rows: pd.DataFrame, transform, embedder, args, device: torch.devi
                 image_root: Path, label: str) -> np.ndarray:
     n = len(rows)
     embeddings = np.zeros((n, embedder.embed_dim), dtype=np.float32)
+    n_empty_text, n_total_text = 0, 0
     with torch.no_grad():
         for start in range(0, n, args.batch_size):
             batch = rows.iloc[start : start + args.batch_size]
-            images = torch.stack(
-                [transform(default_loader(str(image_root / p))) for p in batch[args.image_col]]
-            ).to(device)
 
-            if args.modality == "vision":
-                out = embedder(images)
-            else:
+            if args.modality == "text":
+                # no image ever touched - the whole point of this modality
                 texts = [
                     extract_text(str(image_root / p)) if pd.notna(p) else "" for p in batch[args.pagexml_col]
                 ]
-                encoded = embedder.text_embedder.tokenizer(
+                n_empty_text += sum(1 for t in texts if not t.strip())
+                n_total_text += len(texts)
+                encoded = embedder.tokenizer(
                     texts, padding=True, truncation=True, max_length=args.max_text_length, return_tensors="pt"
                 )
-                out = embedder(images, encoded["input_ids"].to(device), encoded["attention_mask"].to(device))
+                out = embedder(encoded["input_ids"].to(device), encoded["attention_mask"].to(device))
+            else:
+                images = torch.stack(
+                    [transform(default_loader(str(image_root / p))) for p in batch[args.image_col]]
+                ).to(device)
+                if args.modality == "vision":
+                    out = embedder(images)
+                else:
+                    texts = [
+                        extract_text(str(image_root / p)) if pd.notna(p) else "" for p in batch[args.pagexml_col]
+                    ]
+                    n_empty_text += sum(1 for t in texts if not t.strip())
+                    n_total_text += len(texts)
+                    encoded = embedder.text_embedder.tokenizer(
+                        texts, padding=True, truncation=True, max_length=args.max_text_length, return_tensors="pt"
+                    )
+                    out = embedder(images, encoded["input_ids"].to(device), encoded["attention_mask"].to(device))
 
             embeddings[start : start + len(batch)] = out.cpu().numpy()
             if (start // args.batch_size) % 20 == 0:
                 print(f"  [{label}] {start + len(batch)}/{n}")
+
+    # An empty string tokenizes to the same [CLS][SEP]-only input every
+    # time, so if PageXML paths are silently failing to resolve/parse
+    # (wrong --pagexml-col, wrong --image-root, or a tag-name mismatch in
+    # pagexml.py's assumptions about the PAGE-XML schema in use),
+    # extract_text()'s "return '' rather than raise" fallback (by design,
+    # so pages that legitimately have no transcription - e.g. photos -
+    # don't break the run) quietly produces near-identical embeddings for
+    # every page instead of an error. A handful of legitimately blank pages
+    # is normal; most/all of them being blank is not.
+    if n_total_text > 0:
+        empty_frac = n_empty_text / n_total_text
+        if empty_frac > 0.5:
+            print(f"  WARNING [{label}]: {n_empty_text}/{n_total_text} ({empty_frac:.0%}) pages produced empty "
+                  f"text - check --pagexml-col/--image-root are correct and that pagexml.py's tag-name "
+                  f"assumptions (TextLine/TextEquiv/Unicode) match your PAGE-XML schema. Embeddings from mostly-"
+                  f"empty text will be near-identical regardless of each page's real content.")
     return embeddings
 
 
@@ -110,9 +150,9 @@ def main():
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--image-root", type=Path, default=Path(""))
     parser.add_argument("--out-dir", type=Path, required=True)
-    parser.add_argument("--modality", choices=["vision", "multimodal"], default="vision")
+    parser.add_argument("--modality", choices=["vision", "multimodal", "text"], default="vision")
     parser.add_argument("--image-backbone", default="facebook/dinov2-small")
-    parser.add_argument("--text-backbone", default="xlm-roberta-base")
+    parser.add_argument("--text-backbone", default="bert-base-uncased")
     parser.add_argument("--image-size", type=int, default=224)
     parser.add_argument("--max-text-length", type=int, default=256)
     parser.add_argument("--batch-size", type=int, default=32)
@@ -135,6 +175,16 @@ def main():
     device = pick_device(args.device)
     print(f"device: {device}")
 
+    if args.augment_passes > 0 and args.modality == "text":
+        # A frozen text backbone in eval() mode (no dropout) is fully
+        # deterministic - re-embedding the same text N times produces
+        # bit-identical vectors, so augmented passes would just be wasted
+        # disk/compute here, unlike for images (where the transform draws a
+        # fresh random crop/rotation/jitter every call).
+        print("--augment-passes has no effect for --modality text (a frozen text encoder is deterministic - "
+              "there's no text-side equivalent of image augmentation here) - ignoring.")
+        args.augment_passes = 0
+
     sep = "\t" if str(args.manifest).endswith(".tsv") else ","
     manifest = pd.read_csv(args.manifest, sep=sep)
     n = len(manifest)
@@ -142,6 +192,9 @@ def main():
 
     if args.modality == "vision":
         embedder = PageEmbedder(args.image_backbone, unfreeze_last_n_blocks=0, device=device).to(device)
+    elif args.modality == "text":
+        embedder = TextEmbedder(args.text_backbone, unfreeze_last_n_layers=0, max_length=args.max_text_length,
+                                 device=device).to(device)
     else:
         embedder = MultimodalPageEmbedder(
             args.image_backbone, args.text_backbone, unfreeze_image_blocks=0, unfreeze_text_layers=0,

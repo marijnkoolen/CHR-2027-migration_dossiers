@@ -25,12 +25,12 @@ MultimodalBackboneClassifier).
 
 Examples:
     # efficient, single page, vision-only, document type
-    python scripts/vision/train.py --manifest data/dummy_sequences/manifest.tsv \\
+    python scripts/classification/train.py --manifest data/dummy_sequences/manifest.tsv \\
         --scenario efficient --mode page --modality vision --target document_type
 
     # quality, whole-PDF sequence context, image+text, best checkpoint
     # tracked on start-page + document-type
-    python scripts/vision/train.py --manifest data/dummy_sequences/manifest.tsv \\
+    python scripts/classification/train.py --manifest data/dummy_sequences/manifest.tsv \\
         --scenario quality --mode sequence --modality multimodal \\
         --target start_page document_type
 
@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections import Counter
 from pathlib import Path
 
@@ -55,17 +56,26 @@ from torch.utils.data import DataLoader
 from torchvision.datasets.folder import default_loader
 from transformers import AutoConfig, AutoTokenizer
 
+# The shared library modules (common.py, models.py, etc.) live in lib/, a
+# subdirectory of this script's own directory rather than an installed
+# package - add it to sys.path so they can be imported by plain name.
+sys.path.insert(0, str(Path(__file__).parent / "lib"))
+
 from common import build_dataloaders_from_manifest, build_transforms, format_confusion_matrix, pick_device
 from models import (
     BackboneClassifier,
     MultimodalBackboneClassifier,
     MultimodalPageEmbedder,
     PageEmbedder,
+    TextBackboneClassifier,
+    TextEmbedder,
     trainable_parameter_summary,
 )
 from multimodal_data import build_multimodal_dataloaders
 from sequence_data import IGNORE_INDEX, PageBudgetBatchSampler, PageSequenceDataset, build_label_vocab, make_pdf_collate_fn
 from sequence_model import SequenceContextModel
+from text_data import build_text_dataloaders
+from recompose_sequences import recompose_documents
 from train_from_embeddings import EmbeddingSequenceDataset
 from train_from_embeddings import collate as collate_cached_embeddings
 from train_from_embeddings import compute_losses as compute_losses_cached_embeddings
@@ -87,13 +97,13 @@ TARGET_METRIC_KEY = {
 
 PRESETS = {
     "efficient": dict(
-        image_backbone="facebook/dinov2-small", text_backbone="xlm-roberta-base",
+        image_backbone="facebook/dinov2-small", text_backbone="bert-base-uncased",
         unfreeze_image_blocks=2, unfreeze_text_layers=2, image_size=224, batch_size=32,
         epochs=15, lr=1e-3, lr_backbone=1e-4, lr_head=1e-3, augment_strength="moderate",
         max_text_length=256, tta_views=0, n_heads=4, n_layers=2,
     ),
     "quality": dict(
-        image_backbone="microsoft/dit-large-finetuned-rvlcdip", text_backbone="xlm-roberta-large",
+        image_backbone="microsoft/dit-large-finetuned-rvlcdip", text_backbone="bert-base-uncased",
         unfreeze_image_blocks=1000, unfreeze_text_layers=1000, image_size=336, batch_size=8,
         epochs=30, lr=2e-5, lr_backbone=2e-5, lr_head=1e-3, augment_strength="strong",
         max_text_length=256, tta_views=5, n_heads=8, n_layers=4,
@@ -208,6 +218,14 @@ def make_multimodal_forward(model, device):
     return forward
 
 
+def make_text_forward(model, device):
+    def forward(batch):
+        input_ids, attention_mask, targets = batch
+        logits = model(input_ids.to(device), attention_mask.to(device))
+        return logits, targets.to(device)
+    return forward
+
+
 @torch.no_grad()
 def evaluate_page_model(model, loader: DataLoader, device, classes: list[str], forward_fn, amp: bool = False) -> dict:
     model.eval()
@@ -299,13 +317,19 @@ def train_page_model(model, train_loader, val_loader, test_loader, classes, devi
     # samples) over the exact data being trained on. If this is also stuck
     # at majority-class-only, the model can't even fit what it's training
     # on - an optimization/capacity problem, not a generalization one.
-    original_transform = train_loader.dataset.transform
-    train_loader.dataset.transform = build_transforms(image_size, train=False)
+    # TextManifestDataset has no .transform at all (text isn't augmented),
+    # so there's nothing to swap out for text-only mode - it's already a
+    # clean, deterministic pass every time.
+    has_transform = hasattr(train_loader.dataset, "transform")
+    if has_transform:
+        original_transform = train_loader.dataset.transform
+        train_loader.dataset.transform = build_transforms(image_size, train=False)
     train_eval_loader = DataLoader(
         train_loader.dataset, batch_size=train_loader.batch_size, shuffle=False, collate_fn=train_loader.collate_fn
     )
     train_metrics = evaluate_page_model(model, train_eval_loader, device, classes, forward_fn, amp=amp)
-    train_loader.dataset.transform = original_transform
+    if has_transform:
+        train_loader.dataset.transform = original_transform
     print(f"\ntrain-set (no augmentation) accuracy={train_metrics['accuracy']:.3f}  "
           f"macro-F1={train_metrics['macro_f1']:.3f}")
     (out_dir / "train_set_report.txt").write_text(train_metrics["report"])
@@ -345,7 +369,7 @@ def run_page(args, target_column: str):
             gradient_checkpointing=args.gradient_checkpointing, project_to=args.project_to,
         ).to(device)
         forward_fn = make_vision_forward(model, device)
-    else:
+    elif args.modality == "multimodal":
         tokenizer = AutoTokenizer.from_pretrained(args.text_backbone)
         train_loader, val_loader, test_loader, classes = build_multimodal_dataloaders(
             args.manifest, args.image_root, target_column, tokenizer,
@@ -360,6 +384,19 @@ def run_page(args, target_column: str):
             gradient_checkpointing=args.gradient_checkpointing,
         ).to(device)
         forward_fn = make_multimodal_forward(model, device)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(args.text_backbone)
+        train_loader, val_loader, test_loader, classes = build_text_dataloaders(
+            args.manifest, args.image_root, target_column, tokenizer,
+            pagexml_col=args.pagexml_col, split_col=args.split_col,
+            batch_size=args.batch_size, max_text_length=args.max_text_length, seed=args.seed,
+        )
+        model = TextBackboneClassifier(
+            args.text_backbone, len(classes), unfreeze_last_n_layers=args.unfreeze_text_layers,
+            max_length=args.max_text_length, project_to=args.project_to, device=device,
+            gradient_checkpointing=args.gradient_checkpointing,
+        ).to(device)
+        forward_fn = make_text_forward(model, device)
 
     print(f"{len(classes)} classes, {len(train_loader.dataset)} train pages, target={target_column!r}")
     print(trainable_parameter_summary(model))
@@ -388,18 +425,33 @@ def run_page(args, target_column: str):
 # --------------------------------------------------------------------------
 
 def embed_pages(embedder, batch: dict, device) -> tuple[torch.Tensor, torch.Tensor]:
-    images = batch["images_flat"].to(device)
-    if "input_ids_flat" in batch:
-        embeds_flat = embedder(images, batch["input_ids_flat"].to(device), batch["attention_mask_flat"].to(device))
+    if "images_flat" in batch:
+        images = batch["images_flat"].to(device)
+        if "input_ids_flat" in batch:
+            embeds_flat = embedder(images, batch["input_ids_flat"].to(device), batch["attention_mask_flat"].to(device))
+        else:
+            embeds_flat = embedder(images)
     else:
-        embeds_flat = embedder(images)
+        # text-only: no images_flat at all (PageSequenceDataset was built with image_col=None)
+        embeds_flat = embedder(batch["input_ids_flat"].to(device), batch["attention_mask_flat"].to(device))
     B, T = batch["padding_mask"].shape
     embeddings = torch.zeros(B, T, embedder.embed_dim, device=device, dtype=embeds_flat.dtype)
     embeddings[batch["batch_index"], batch["time_index"]] = embeds_flat
     return embeddings, batch["padding_mask"].to(device)
 
 
-def compute_sequence_losses(out: dict, batch: dict, device, start_pos_weight: float) -> dict:
+def compute_sequence_losses(out: dict, batch: dict, device, start_pos_weight: float,
+                             loss_weights: dict[str, float] | None = None) -> dict:
+    """loss_weights (optional): {"start"/"doctype"/"layout"/"functional": weight},
+    missing keys default to 1.0 (current behaviour). Doctype's raw loss runs
+    ~2x layout/functional's and ~4-5x start's (36 classes, many with under
+    10 - some with exactly 1 - training examples), so with a plain unweighted
+    sum it dominates the shared gradient this all backprops through;
+    downweighting it (e.g. --loss-weight-doctype 0.3) tests whether that
+    dominance, not just doctype's own difficulty, is holding the other
+    heads back."""
+    weights = {"start": 1.0, "doctype": 1.0, "layout": 1.0, "functional": 1.0, **(loss_weights or {})}
+
     padding_mask = batch["padding_mask"].to(device)
     valid = ~padding_mask
 
@@ -417,7 +469,8 @@ def compute_sequence_losses(out: dict, batch: dict, device, start_pos_weight: fl
     doctype_loss = ce_loss(out["doctype_logits"], "doctype")
     layout_loss = ce_loss(out["layout_logits"], "layout")
     functional_loss = ce_loss(out["functional_logits"], "functional")
-    total = start_loss + doctype_loss + layout_loss + functional_loss
+    total = (weights["start"] * start_loss + weights["doctype"] * doctype_loss
+             + weights["layout"] * layout_loss + weights["functional"] * functional_loss)
     return {"total": total, "start": start_loss, "doctype": doctype_loss, "layout": layout_loss, "functional": functional_loss}
 
 
@@ -501,6 +554,21 @@ def run_sequence_from_cached_embeddings(args, targets: list[str]) -> None:
 
     embeddings = np.load(args.cached_embeddings / "embeddings.npy")
     manifest = pd.read_csv(args.cached_embeddings / "embeddings_manifest.tsv", sep="\t")
+
+    if args.recompose_passes > 0:
+        # precompute_embeddings.py's output manifest always uses this fixed
+        # column-name schema (unlike --manifest, which is configurable via
+        # --pdf-col etc.) - row_id (and therefore the embeddings.npy lookup)
+        # passes through recompose_documents unchanged either way.
+        synthetic = recompose_documents(
+            manifest, "pdf_id", "page_number", "document_type", "start_page", "split",
+            mode=args.recompose_mode, passes=args.recompose_passes,
+            cover_doctype=(args.cover_doctype or None), seed=args.seed,
+        )
+        print(f"--recompose-passes {args.recompose_passes} ({args.recompose_mode}): added "
+              f"{synthetic['pdf_id'].nunique()} synthetic train PDFs ({len(synthetic)} rows)")
+        manifest = pd.concat([manifest, synthetic], ignore_index=True)
+
     raw_dim = embeddings.shape[1]
     # ProjectedSequenceModel always builds a real (trainable) projection
     # layer, even when no shrinking is requested - so when --project-to is
@@ -513,15 +581,21 @@ def run_sequence_from_cached_embeddings(args, targets: list[str]) -> None:
           f"project_to={project_to}{' (unchanged, no shrinking requested)' if not args.project_to else ''}")
 
     multimodal = args.modality == "multimodal"
+    text_only = args.modality == "text"
     # Fail fast, before spending a full training run: the embeddings' own
     # dimensionality has to match what --image-backbone(+--text-backbone)
     # would actually produce, or folding the trained projection into a real
     # embedder at the end (which needs that exact shape) errors out late.
-    expected_dim = AutoConfig.from_pretrained(args.image_backbone).hidden_size
-    if multimodal:
-        expected_dim += AutoConfig.from_pretrained(args.text_backbone).hidden_size
+    if text_only:
+        expected_dim = AutoConfig.from_pretrained(args.text_backbone).hidden_size
+        backbones = args.text_backbone
+    else:
+        expected_dim = AutoConfig.from_pretrained(args.image_backbone).hidden_size
+        backbones = args.image_backbone
+        if multimodal:
+            expected_dim += AutoConfig.from_pretrained(args.text_backbone).hidden_size
+            backbones += f" + {args.text_backbone}"
     if expected_dim != raw_dim:
-        backbones = args.image_backbone + (f" + {args.text_backbone}" if multimodal else "")
         raise SystemExit(
             f"--cached-embeddings dim ({raw_dim}) doesn't match --image-backbone/--text-backbone "
             f"({backbones} -> {expected_dim}-dim). Pass the backbone(s) actually used by "
@@ -550,9 +624,16 @@ def run_sequence_from_cached_embeddings(args, targets: list[str]) -> None:
     start_pos_weight = max(1.0, (n_total - n_pos) / max(1, n_pos))
     print(f"start-page positive rate: {n_pos / max(1, n_total):.2f} (pos_weight={start_pos_weight:.2f})")
 
+    loss_weights = {
+        "start": args.loss_weight_start, "doctype": args.loss_weight_doctype,
+        "layout": args.loss_weight_layout, "functional": args.loss_weight_functional,
+    }
+    if any(w != 1.0 for w in loss_weights.values()):
+        print(f"loss weights: {loss_weights}")
+
     model = ProjectedSequenceModel(
         raw_dim, project_to, len(doctype_classes), len(layout_classes), len(functional_classes),
-        args.n_heads, args.n_layers,
+        args.n_heads, args.n_layers, doc_classification=args.doc_classification,
     ).to(device)
     print(f"sequence model (+ projection): {trainable_parameter_summary(model)}")
 
@@ -570,7 +651,7 @@ def run_sequence_from_cached_embeddings(args, targets: list[str]) -> None:
             embeddings_batch = batch["embeddings"].to(device)
             padding_mask = batch["padding_mask"].to(device)
             out = model(embeddings_batch, padding_mask, true_start_page=batch["start"].to(device))
-            losses = compute_losses_cached_embeddings(out, batch, device, start_pos_weight)
+            losses = compute_losses_cached_embeddings(out, batch, device, start_pos_weight, loss_weights=loss_weights)
 
             optimizer.zero_grad()
             losses["total"].backward()
@@ -622,6 +703,10 @@ def run_sequence_from_cached_embeddings(args, targets: list[str]) -> None:
             args.image_backbone, args.text_backbone, max_text_length=args.max_text_length,
             project_to=project_to, device=device,
         ).to(device)
+    elif text_only:
+        embedder = TextEmbedder(
+            args.text_backbone, max_length=args.max_text_length, project_to=project_to, device=device,
+        ).to(device)
     else:
         embedder = PageEmbedder(args.image_backbone, project_to=project_to, device=device).to(device)
     embedder.projection.load_state_dict(model.projection.state_dict())
@@ -630,13 +715,14 @@ def run_sequence_from_cached_embeddings(args, targets: list[str]) -> None:
                args.out_dir / "sequence_model.pt")
     (args.out_dir / "model_config.json").write_text(json.dumps({
         "modality": args.modality,
-        "image_backbone": args.image_backbone,
-        "text_backbone": args.text_backbone if multimodal else None,
+        "image_backbone": None if text_only else args.image_backbone,
+        "text_backbone": args.text_backbone if (multimodal or text_only) else None,
         "image_size": args.image_size,
         "max_text_length": args.max_text_length,
         "project_to": project_to,
         "n_heads": args.n_heads,
         "n_layers": args.n_layers,
+        "doc_classification": args.doc_classification,
         "embed_dim": embedder.embed_dim,
     }, indent=2))
 
@@ -695,6 +781,16 @@ def run_sequence(args, targets: list[str]):
 
     manifest = pd.read_csv(args.manifest, sep="\t" if str(args.manifest).endswith(".tsv") else ",")
 
+    if args.recompose_passes > 0:
+        synthetic = recompose_documents(
+            manifest, args.pdf_col, args.page_col, args.doctype_col, args.start_col, args.split_col,
+            mode=args.recompose_mode, passes=args.recompose_passes,
+            cover_doctype=(args.cover_doctype or None), seed=args.seed,
+        )
+        print(f"--recompose-passes {args.recompose_passes} ({args.recompose_mode}): added "
+              f"{synthetic[args.pdf_col].nunique()} synthetic train PDFs ({len(synthetic)} rows)")
+        manifest = pd.concat([manifest, synthetic], ignore_index=True)
+
     doctype_classes = build_label_vocab(manifest, args.split_col, args.doctype_col)
     layout_classes = build_label_vocab(manifest, args.split_col, args.layout_col)
     functional_classes = build_label_vocab(manifest, args.split_col, args.functional_col)
@@ -702,17 +798,18 @@ def run_sequence(args, targets: list[str]):
           f"{len(functional_classes)} functional classes")
 
     multimodal = args.modality == "multimodal"
-    tokenizer = AutoTokenizer.from_pretrained(args.text_backbone) if multimodal else None
+    text_only = args.modality == "text"
+    tokenizer = AutoTokenizer.from_pretrained(args.text_backbone) if (multimodal or text_only) else None
 
     def make_dataset(split: str, train: bool) -> PageSequenceDataset:
         return PageSequenceDataset(
             manifest, split, args.image_root,
             build_transforms(args.image_size, train=train, augment_strength=args.augment_strength),
             doctype_classes, layout_classes, functional_classes,
-            pdf_col=args.pdf_col, page_col=args.page_col, image_col=args.image_col,
+            pdf_col=args.pdf_col, page_col=args.page_col, image_col=None if text_only else args.image_col,
             doctype_col=args.doctype_col, layout_col=args.layout_col, functional_col=args.functional_col,
             start_col=args.start_col, split_col=args.split_col,
-            pagexml_col=args.pagexml_col if multimodal else None,
+            pagexml_col=args.pagexml_col if (multimodal or text_only) else None,
         )
 
     train_ds = make_dataset("train", train=True)
@@ -741,12 +838,24 @@ def run_sequence(args, targets: list[str]):
     start_pos_weight = max(1.0, (n_total - n_pos) / max(1, n_pos))
     print(f"start-page positive rate: {n_pos / max(1, n_total):.2f} (pos_weight={start_pos_weight:.2f})")
 
+    loss_weights = {
+        "start": args.loss_weight_start, "doctype": args.loss_weight_doctype,
+        "layout": args.loss_weight_layout, "functional": args.loss_weight_functional,
+    }
+    if any(w != 1.0 for w in loss_weights.values()):
+        print(f"loss weights: {loss_weights}")
+
     if multimodal:
         embedder = MultimodalPageEmbedder(
             image_backbone=args.image_backbone, text_backbone=args.text_backbone,
             unfreeze_image_blocks=args.unfreeze_image_blocks, unfreeze_text_layers=args.unfreeze_text_layers,
             max_text_length=args.max_text_length, project_to=args.project_to, device=device,
             gradient_checkpointing=args.gradient_checkpointing,
+        ).to(device)
+    elif text_only:
+        embedder = TextEmbedder(
+            args.text_backbone, unfreeze_last_n_layers=args.unfreeze_text_layers, max_length=args.max_text_length,
+            device=device, gradient_checkpointing=args.gradient_checkpointing, project_to=args.project_to,
         ).to(device)
     else:
         embedder = PageEmbedder(
@@ -757,6 +866,7 @@ def run_sequence(args, targets: list[str]):
     seq_model = SequenceContextModel(
         embed_dim=embedder.embed_dim, num_doctype=len(doctype_classes), num_layout=len(layout_classes),
         num_functional=len(functional_classes), n_heads=args.n_heads, n_layers=args.n_layers,
+        doc_classification=args.doc_classification,
     ).to(device)
     # Reported separately since a frozen backbone (0% here) is expected and
     # correct, not a sign nothing is training - the Transformer encoder and
@@ -784,7 +894,7 @@ def run_sequence(args, targets: list[str]):
             with autocast_context(device, amp):
                 embeddings, padding_mask = embed_pages(embedder, batch, device)
                 out = seq_model(embeddings, padding_mask, true_start_page=batch["start"].to(device))
-                losses = compute_sequence_losses(out, batch, device, start_pos_weight)
+                losses = compute_sequence_losses(out, batch, device, start_pos_weight, loss_weights=loss_weights)
 
             optimizer.zero_grad()
             losses["total"].backward()
@@ -838,13 +948,14 @@ def run_sequence(args, targets: list[str]):
     # defines the model's shape does.
     (args.out_dir / "model_config.json").write_text(json.dumps({
         "modality": args.modality,
-        "image_backbone": args.image_backbone,
-        "text_backbone": args.text_backbone if multimodal else None,
+        "image_backbone": None if text_only else args.image_backbone,
+        "text_backbone": args.text_backbone if (multimodal or text_only) else None,
         "image_size": args.image_size,
         "max_text_length": args.max_text_length,
         "project_to": args.project_to,
         "n_heads": args.n_heads,
         "n_layers": args.n_layers,
+        "doc_classification": args.doc_classification,
         "embed_dim": embedder.embed_dim,
     }, indent=2))
 
@@ -955,7 +1066,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--scenario", choices=list(PRESETS), required=True)
     parser.add_argument("--mode", choices=["page", "sequence"], required=True)
-    parser.add_argument("--modality", choices=["vision", "multimodal"], required=True)
+    parser.add_argument("--modality", choices=["vision", "multimodal", "text"], required=True)
     parser.add_argument(
         "--target", nargs="+", choices=list(TARGET_COLUMN_ARG), default=None,
         help="page mode: exactly one. sequence mode: default is all four (see module docstring).",
@@ -995,6 +1106,53 @@ def build_arg_parser() -> argparse.ArgumentParser:
                               "so a big backbone can badly overparameterize them against a typically tiny "
                               "PDF-level training set and collapse training onto predicting the label's "
                               "marginal frequency regardless of the page. Default: no projection.")
+    parser.add_argument("--doc-classification", choices=["early", "late"], default="late",
+                         help="sequence mode only: how document_type/layout_type/functional_category use "
+                              "document segments - see sequence_model.py's module docstring. Both read the "
+                              "Transformer encoder's contextualized state (a from-scratch feedforward path on "
+                              "the raw embedding alone reliably collapses). 'late' (default): each page "
+                              "classified from its own contextualized state (not pooled with document-mates) - "
+                              "full per-page training signal, merged into a document-level label downstream. "
+                              "'early': the segment's contextualized states are mean-pooled first, one shared "
+                              "input per document - closer to classifying the document once, at the cost of "
+                              "being corrupted outright by a wrong segment boundary rather than contributing "
+                              "just one bad vote.")
+    parser.add_argument("--recompose-passes", type=int, default=0,
+                         help="sequence mode only: also train on this many synthetic PDF sequences per real "
+                              "training PDF, built by regrouping/reordering real, intact documents (not "
+                              "individual pages) rather than using only the real PDF groupings - see "
+                              "recompose_sequences.py. Targets a different bottleneck than augmentation: the "
+                              "Transformer encoder's own weights are shaped by only as many independent "
+                              "sequences as there are real training PDFs, however many labeled pages/documents "
+                              "are packed inside them; this increases how many distinct sequence *compositions* "
+                              "it trains on. Dose-sensitive - confirmed empirically (text embeddings): at 8x the "
+                              "real training PDF count, doctype and start_page both collapsed back to "
+                              "majority-class prediction, most likely from diluting whatever real (if weak) "
+                              "compositional signal exists in actual dossiers under a much larger volume of "
+                              "structurally-random synthetic ones; at 1-3x, doctype improved modestly and "
+                              "start_page did not collapse, but check precision/recall (not just F1) before "
+                              "trusting any start_page change - its class imbalance means F1-for-the-positive-"
+                              "class can rise just from predicting the majority class more often, which looks "
+                              "like improvement but isn't. Start low (1-3) and check val metrics before raising "
+                              "it. 0 = off (default).")
+    parser.add_argument("--recompose-mode", choices=["shuffle", "recombine"], default="recombine",
+                         help="'shuffle': reorders each real PDF's own documents only. 'recombine': pools "
+                              "documents across all real training PDFs and draws new random groupings - "
+                              "combinatorially more distinct sequences. See recompose_sequences.py.")
+    parser.add_argument("--cover-doctype", default="NAA cover",
+                         help="document type always pinned to position 0 of a synthetic sequence, if present "
+                              "(matches a real archival convention: a post-digitisation cover page always "
+                              "starts a dossier, not part of the original document order). Pass '' to disable.")
+
+    parser.add_argument("--loss-weight-start", type=float, default=1.0)
+    parser.add_argument("--loss-weight-doctype", type=float, default=1.0,
+                         help="sequence mode only: the four task losses are summed unweighted by default. "
+                              "document_type's raw loss (36 classes, ~half with under 10 training examples, "
+                              "several with exactly 1) runs ~2x layout/functional's and ~4-5x start's - "
+                              "downweighting it (e.g. 0.3) tests whether that dominance in the shared "
+                              "gradient, not just doctype's own difficulty, is holding the other heads back.")
+    parser.add_argument("--loss-weight-layout", type=float, default=1.0)
+    parser.add_argument("--loss-weight-functional", type=float, default=1.0)
 
     # Manifest column names (defaults match this project's real annotation schema)
     parser.add_argument("--pdf-col", default="pdf_name")

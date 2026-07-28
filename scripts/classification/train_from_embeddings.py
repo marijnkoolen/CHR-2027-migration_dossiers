@@ -12,7 +12,7 @@ pipeline (segmentation, batching, loss/eval) - not the backbone, not bf16,
 and not anything specific to loading real images/text.
 
 Usage:
-    python scripts/vision/train_from_embeddings.py \\
+    python scripts/classification/train_from_embeddings.py \\
         --embeddings data/embeddings/embeddings.npy \\
         --manifest data/embeddings/embeddings_manifest.tsv
 """
@@ -20,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -28,6 +29,8 @@ import torch
 import torch.nn.functional as F
 from sklearn.metrics import classification_report, f1_score, precision_recall_fscore_support
 from torch.utils.data import DataLoader, Dataset
+
+sys.path.insert(0, str(Path(__file__).parent / "lib"))
 
 from common import pick_device
 from sequence_model import SequenceContextModel
@@ -102,7 +105,14 @@ def collate(batch: list[tuple]) -> dict:
     }
 
 
-def compute_losses(out: dict, batch: dict, device, start_pos_weight: float) -> dict:
+def compute_losses(out: dict, batch: dict, device, start_pos_weight: float,
+                    loss_weights: dict[str, float] | None = None) -> dict:
+    """loss_weights (optional): {"start"/"doctype"/"layout"/"functional": weight},
+    missing keys default to 1.0 (current behaviour) - see train.py's
+    compute_sequence_losses for why this exists (doctype's raw loss tends
+    to dominate the unweighted sum)."""
+    weights = {"start": 1.0, "doctype": 1.0, "layout": 1.0, "functional": 1.0, **(loss_weights or {})}
+
     padding_mask = batch["padding_mask"].to(device)
     valid = ~padding_mask
 
@@ -120,7 +130,8 @@ def compute_losses(out: dict, batch: dict, device, start_pos_weight: float) -> d
     doctype_loss = ce_loss(out["doctype_logits"], "doctype")
     layout_loss = ce_loss(out["layout_logits"], "layout")
     functional_loss = ce_loss(out["functional_logits"], "functional")
-    total = start_loss + doctype_loss + layout_loss + functional_loss
+    total = (weights["start"] * start_loss + weights["doctype"] * doctype_loss
+             + weights["layout"] * layout_loss + weights["functional"] * functional_loss)
     return {"total": total, "start": start_loss, "doctype": doctype_loss, "layout": layout_loss, "functional": functional_loss}
 
 
@@ -184,6 +195,17 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--n-heads", type=int, default=4)
     parser.add_argument("--n-layers", type=int, default=2)
+    parser.add_argument("--doc-classification", choices=["early", "late"], default="late",
+                         help="how doctype/layout/functional use document segments - see sequence_model.py's "
+                              "module docstring.")
+    parser.add_argument("--loss-weight-start", type=float, default=1.0)
+    parser.add_argument("--loss-weight-doctype", type=float, default=1.0,
+                         help="the four task losses are summed unweighted by default - document_type's raw loss "
+                              "runs ~2x layout/functional's and ~4-5x start's (many classes with under 10, some "
+                              "with exactly 1, training examples), so downweighting it (e.g. 0.3) tests whether "
+                              "that dominance in the shared gradient is holding the other heads back.")
+    parser.add_argument("--loss-weight-layout", type=float, default=1.0)
+    parser.add_argument("--loss-weight-functional", type=float, default=1.0)
     parser.add_argument("--noise-std", type=float, default=0.0,
                          help="stddev of Gaussian noise added independently to each page's embedding on every "
                               "training forward pass (not eval) - simulates the effect of the real pipeline's "
@@ -219,9 +241,17 @@ def main():
     start_pos_weight = max(1.0, (n_total - n_pos) / max(1, n_pos))
     print(f"start-page positive rate: {n_pos / max(1, n_total):.2f} (pos_weight={start_pos_weight:.2f})")
 
+    loss_weights = {
+        "start": args.loss_weight_start, "doctype": args.loss_weight_doctype,
+        "layout": args.loss_weight_layout, "functional": args.loss_weight_functional,
+    }
+    if any(w != 1.0 for w in loss_weights.values()):
+        print(f"loss weights: {loss_weights}")
+
     seq_model = SequenceContextModel(
         embed_dim=embeddings.shape[1], num_doctype=len(doctype_classes), num_layout=len(layout_classes),
         num_functional=len(functional_classes), n_heads=args.n_heads, n_layers=args.n_layers,
+        doc_classification=args.doc_classification,
     ).to(device)
 
     optimizer = torch.optim.AdamW(seq_model.parameters(), lr=args.lr, weight_decay=1e-4)
@@ -238,7 +268,7 @@ def main():
                 embeddings_batch = embeddings_batch + torch.randn_like(embeddings_batch) * args.noise_std
             padding_mask = batch["padding_mask"].to(device)
             out = seq_model(embeddings_batch, padding_mask, true_start_page=batch["start"].to(device))
-            losses = compute_losses(out, batch, device, start_pos_weight)
+            losses = compute_losses(out, batch, device, start_pos_weight, loss_weights=loss_weights)
 
             optimizer.zero_grad()
             losses["total"].backward()
