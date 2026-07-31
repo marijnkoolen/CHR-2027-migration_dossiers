@@ -55,7 +55,6 @@ class InferencePageSequenceDataset(Dataset):
         self.transform = transform
         self.image_col = image_col
         self.pagexml_col = pagexml_col
-        self._text_cache: dict[str, str] = {}
         self.pdfs: list[pd.DataFrame] = [
             group.sort_values(page_col) for _, group in manifest.groupby(pdf_col, sort=False)
         ]
@@ -66,13 +65,6 @@ class InferencePageSequenceDataset(Dataset):
     def page_counts(self) -> list[int]:
         return [len(g) for g in self.pdfs]
 
-    def _text_for(self, pagexml_path: str) -> str:
-        if not pagexml_path:
-            return ""
-        if pagexml_path not in self._text_cache:
-            self._text_cache[pagexml_path] = extract_text(pagexml_path)
-        return self._text_cache[pagexml_path]
-
     def __getitem__(self, idx: int):
         group = self.pdfs[idx]
         if self.image_col:
@@ -81,8 +73,14 @@ class InferencePageSequenceDataset(Dataset):
         else:
             images = None
         if self.pagexml_col:
+            # No caching here (unlike sequence_data.PageSequenceDataset,
+            # used for training): inference is one pass over the manifest,
+            # so every page's PageXML is read exactly once regardless - a
+            # cache would only accumulate the whole corpus's extracted text
+            # in memory for zero reuse benefit, which is exactly what was
+            # driving memory usage into the tens of GB on large corpora.
             texts = [
-                self._text_for(str(self.image_root / p)) if pd.notna(p) else "" for p in group[self.pagexml_col]
+                extract_text(str(self.image_root / p)) if pd.notna(p) else "" for p in group[self.pagexml_col]
             ]
         else:
             texts = [""] * len(group)
@@ -135,46 +133,66 @@ def embed_pages(embedder, batch: dict, device: torch.device) -> tuple[torch.Tens
 
 
 @torch.no_grad()
-def predict_all(embedder, seq_model, loader: DataLoader, classes: dict, device: torch.device, amp: bool) -> pd.DataFrame:
+def predict_all(embedder, seq_model, loader: DataLoader, classes: dict, device: torch.device, amp: bool,
+                 pdf_col: str, out_path: Path) -> tuple[int, int]:
+    """Streams predictions to `out_path` one batch at a time instead of
+    accumulating every page's prediction row for the whole run in memory -
+    on a large corpus (hundreds of thousands of pages), holding everything
+    until the very end (then building one big DataFrame from it) is what
+    drives memory into the tens of GB. Peak memory here is bounded by one
+    batch's worth of rows instead of the whole dataset's.
+
+    Returns (n_pages, n_predicted_documents)."""
     embedder.eval()
     seq_model.eval()
     doctype_classes = classes["document_type"]
     layout_classes = classes["layout_type"]
     functional_classes = classes["functional_category"]
 
-    all_rows = []
-    for batch in loader:
-        with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=amp):
-            embeddings, padding_mask = embed_pages(embedder, batch, device)
-            out = seq_model(embeddings, padding_mask, true_start_page=None)
+    n_pages = 0
+    segment_ids_seen: set[str] = set()
+    header_written = False
 
-        start_prob = torch.sigmoid(out["start_logits"].float()).cpu()
-        doctype_prob = F.softmax(out["doctype_logits"].float(), dim=-1).cpu()
-        layout_prob = F.softmax(out["layout_logits"].float(), dim=-1).cpu()
-        functional_prob = F.softmax(out["functional_logits"].float(), dim=-1).cpu()
-        segment_ids = out["segment_ids"].cpu()
+    with open(out_path, "w", newline="") as f:
+        for batch in loader:
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=amp):
+                embeddings, padding_mask = embed_pages(embedder, batch, device)
+                out = seq_model(embeddings, padding_mask, true_start_page=None)
 
-        for b, group in enumerate(batch["groups"]):
-            for t in range(len(group)):
-                row = group.iloc[t].to_dict()
-                doc_idx = int(doctype_prob[b, t].argmax())
-                lay_idx = int(layout_prob[b, t].argmax())
-                func_idx = int(functional_prob[b, t].argmax())
-                start_p = float(start_prob[b, t])
-                row.update({
-                    "predicted_start_page": "yes" if start_p > 0.5 else "no",
-                    "start_page_confidence": max(start_p, 1 - start_p),
-                    "predicted_document_type": doctype_classes[doc_idx],
-                    "document_type_confidence": float(doctype_prob[b, t, doc_idx]),
-                    "predicted_layout_type": layout_classes[lay_idx],
-                    "layout_type_confidence": float(layout_prob[b, t, lay_idx]),
-                    "predicted_functional_category": functional_classes[func_idx],
-                    "functional_category_confidence": float(functional_prob[b, t, func_idx]),
-                    "predicted_segment_local_id": int(segment_ids[b, t]),
-                })
-                all_rows.append(row)
+            start_prob = torch.sigmoid(out["start_logits"].float()).cpu()
+            doctype_prob = F.softmax(out["doctype_logits"].float(), dim=-1).cpu()
+            layout_prob = F.softmax(out["layout_logits"].float(), dim=-1).cpu()
+            functional_prob = F.softmax(out["functional_logits"].float(), dim=-1).cpu()
+            segment_ids = out["segment_ids"].cpu()
 
-    return pd.DataFrame(all_rows)
+            batch_rows = []
+            for b, group in enumerate(batch["groups"]):
+                for t in range(len(group)):
+                    row = group.iloc[t].to_dict()
+                    doc_idx = int(doctype_prob[b, t].argmax())
+                    lay_idx = int(layout_prob[b, t].argmax())
+                    func_idx = int(functional_prob[b, t].argmax())
+                    start_p = float(start_prob[b, t])
+                    segment_id = f"{row[pdf_col]}::seg{int(segment_ids[b, t])}"
+                    row.update({
+                        "predicted_start_page": "yes" if start_p > 0.5 else "no",
+                        "start_page_confidence": max(start_p, 1 - start_p),
+                        "predicted_document_type": doctype_classes[doc_idx],
+                        "document_type_confidence": float(doctype_prob[b, t, doc_idx]),
+                        "predicted_layout_type": layout_classes[lay_idx],
+                        "layout_type_confidence": float(layout_prob[b, t, lay_idx]),
+                        "predicted_functional_category": functional_classes[func_idx],
+                        "functional_category_confidence": float(functional_prob[b, t, func_idx]),
+                        "predicted_segment_id": segment_id,
+                    })
+                    batch_rows.append(row)
+                    segment_ids_seen.add(segment_id)
+
+            pd.DataFrame(batch_rows).to_csv(f, sep="\t", index=False, header=not header_written)
+            header_written = True
+            n_pages += len(batch_rows)
+
+    return n_pages, len(segment_ids_seen)
 
 
 def main():
@@ -248,16 +266,10 @@ def main():
     seq_model.load_state_dict(state["seq_model"])
     print("loaded checkpoint")
 
-    predictions = predict_all(embedder, seq_model, loader, classes, device, amp)
-    predictions["predicted_segment_id"] = (
-        predictions[args.pdf_col].astype(str) + "::seg" + predictions["predicted_segment_local_id"].astype(str)
-    )
-
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    predictions.to_csv(args.out, sep="\t", index=False)
+    n_pages, n_docs = predict_all(embedder, seq_model, loader, classes, device, amp, args.pdf_col, args.out)
 
-    n_docs = predictions["predicted_segment_id"].nunique()
-    print(f"\n{len(predictions)} pages, {n_docs} predicted documents")
+    print(f"\n{n_pages} pages, {n_docs} predicted documents")
     print(f"Wrote {args.out}")
 
 

@@ -40,6 +40,7 @@ import argparse
 from collections import Counter
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from merge_rare_doctypes import merge_rare_doctypes
@@ -57,6 +58,9 @@ DOCTYPE_COL = "Document type"
 LAYOUT_COL = "Layout Type Classification"
 FUNCTIONAL_COL = "Functional Categories"
 START_PAGE_COL = "Start page"
+
+PNG_ROOT   = Path('data/image-per-page')
+TEXT_ROOT  = Path('data/text-per-page')
 
 VOTED_COLUMNS = [DOCTYPE_COL, LAYOUT_COL, FUNCTIONAL_COL, START_PAGE_COL]
 
@@ -185,6 +189,43 @@ def merge(long_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     return merged_df, disagreement_df
 
 
+def img_path(dossier: str, page_num: int) -> Path:
+    """<PNG_ROOT>/<dossier>/<dossier>_page_XXXX.png"""
+    return PNG_ROOT / dossier / f'{dossier}_page_{int(page_num):04d}.png'
+
+def text_path(dossier: str, page_num: int) -> Path:
+    """<TEXT_ROOT>/<dossier>/page/page_XXXX.xml"""
+    return TEXT_ROOT / dossier / 'page' / f'page_{int(page_num):04d}.xml'
+
+
+def add_splits(merged_df: pd.DataFrame, random_seed: int = 8963764) -> pd.DataFrame:
+    column_map = {
+        'dossier_name': 'pdf_name',
+        'page number': 'page_num',
+        'Document type': 'document_type',
+        'Document type_agreement': 'document_type_agreement',
+        'Layout Type Classification': 'layout_type',
+        'Layout Type Classification_agreement': 'layout_type_agreement',
+        'Functional Categories': 'functional_category',
+        'Functional Categories_agreement': 'functional_category_agreement',
+        'Start page': 'start_page',
+        'Start page_agreement': 'start_page_agreement',
+    }
+    merged_df = merged_df.rename(columns=column_map)
+    merged_df['pdf_id'] = merged_df.pdf_name.apply(lambda x: x.replace('.pdf', ''))
+
+    merged_df['img_path'] = merged_df.apply(lambda row: img_path(row['pdf_id'], row['page_num']), axis=1)
+    merged_df['text_path'] = merged_df.apply(lambda row: text_path(row['pdf_id'], row['page_num']), axis=1)
+    dossiers = merged_df[['pdf_name']].drop_duplicates()
+    train, validate, test = np.split(dossiers.sample(frac=1, random_state=random_seed), 
+                                     [int(.6*len(dossiers)), int(.8*len(dossiers))])
+    train['split'] = 'train'
+    validate['split'] = 'val'
+    test['split'] = 'test'
+    dossiers = pd.concat([train, validate, test])
+    return pd.merge(merged_df, dossiers, on='pdf_name')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", type=Path, default=Path("data/annotations"))
@@ -215,6 +256,8 @@ def main():
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     merged_df.to_csv(args.out_dir / "merged_annotations.tsv", index=False, sep="\t")
+    merged_split_df = add_splits(merged_df)
+    merged_split_df.to_csv(args.out_dir / "dossier_labels.tsv", sep="\t", index=False)
     disagreement_df.to_csv(args.out_dir / "merge_disagreements.tsv", index=False, sep="\t")
 
     print(f"Merged {len(merged_df)} pages from {sum(len(df) for df in dfs.values())} source rows "

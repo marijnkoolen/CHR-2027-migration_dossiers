@@ -118,16 +118,22 @@ PRESETS = {
 # per-group gradient clipping fix, constant). Page mode's plain linear head
 # doesn't have this joint-optimization issue, so its defaults are untouched.
 SEQUENCE_MODE_OVERRIDES = {
-    "efficient": dict(unfreeze_image_blocks=0, unfreeze_text_layers=0),
-    # DiT-large's 1024-dim embedding overparameterizes SequenceContextModel's
-    # heads against a PDF-level training set this small - confirmed directly
-    # (reproduced the collapse, then fixed it by projecting down to 384,
-    # matching efficient's DINOv2-small dimensionality). Frozen backbone by
-    # default too, same reasoning as efficient above plus a practical one:
-    # full-unfreezing a 304M-param backbone is what caused the original A10
-    # OOM in sequence mode, independent of the dimensionality issue - the
-    # project_to fix doesn't remove that cost, since it sits after the
-    # backbone, not inside it.
+    # project_to=384 applies regardless of scenario/modality: a raw embed_dim
+    # much above ~384 overparameterizes SequenceContextModel's heads against
+    # a PDF-level training set this small - confirmed directly and repeatedly
+    # (DiT-large alone at 1024-dim, and multimodal combinations well above
+    # 384 - e.g. efficient's own dinov2-small+bert-base-uncased is
+    # 384+768=1152-dim - all collapsed to majority-class prediction without
+    # this, and stopped collapsing once projected down to 384). Only
+    # vision-only efficient (dinov2-small, already exactly 384-dim) doesn't
+    # strictly need it, but projecting 384->384 is a no-op in size and safe
+    # to apply uniformly rather than special-casing modality here.
+    "efficient": dict(project_to=384, unfreeze_image_blocks=0, unfreeze_text_layers=0),
+    # Frozen backbone by default too, same reasoning as efficient above plus
+    # a practical one: full-unfreezing a 304M-param backbone is what caused
+    # the original A10 OOM in sequence mode, independent of the
+    # dimensionality issue - the project_to fix doesn't remove that cost,
+    # since it sits after the backbone, not inside it.
     "quality": dict(project_to=384, unfreeze_image_blocks=0, unfreeze_text_layers=0),
 }
 
