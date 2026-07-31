@@ -105,7 +105,8 @@ def load_model(model_id: str, device: str, dtype: str | None, attn_implementatio
     return model, processor
 
 
-def run_prompt(model, processor, device: str, image: Image.Image, prompt: str, max_new_tokens: int) -> tuple[str, float]:
+def run_prompt(model, processor, device: str, image: Image.Image, prompt: str, max_new_tokens: int,
+               no_repeat_ngram_size: int) -> tuple[str, float]:
     messages = [
         {"role": "user", "content": [{"type": "image", "image": image}, {"type": "text", "text": prompt}]}
     ]
@@ -113,8 +114,18 @@ def run_prompt(model, processor, device: str, image: Image.Image, prompt: str, m
         messages, tokenize=True, return_dict=True, return_tensors="pt", add_generation_prompt=True,
     ).to(device)
 
+    generate_kwargs = dict(do_sample=False, max_new_tokens=max_new_tokens)
+    if no_repeat_ngram_size > 0:
+        # Same repeat-the-same-chunk failure mode as GOT-OCR2 (see
+        # run_got_ocr2.py's docstring) - greedy decoding under uncertainty
+        # on hard/ambiguous pages, more likely with a smaller model. This
+        # hard-blocks verbatim n-gram repeats; benchmark_vllm.py uses
+        # frequency_penalty/repetition_penalty instead since vLLM's
+        # OpenAI-compatible API doesn't expose this exact parameter.
+        generate_kwargs["no_repeat_ngram_size"] = no_repeat_ngram_size
+
     t0 = time.time()
-    generate_ids = model.generate(**inputs, do_sample=False, max_new_tokens=max_new_tokens)
+    generate_ids = model.generate(**inputs, **generate_kwargs)
     elapsed = time.time() - t0
     text = processor.batch_decode(
         generate_ids[:, inputs["input_ids"].shape[1]:], skip_special_tokens=True
@@ -133,7 +144,12 @@ def main():
     parser.add_argument("--force", action="store_true", help="reprocess pages even if their output is up to date")
     parser.add_argument("--mode", choices=["markdown", "bbox", "both"], default="both")
     parser.add_argument("--model", default="Qwen/Qwen2.5-VL-3B-Instruct")
-    parser.add_argument("--max-new-tokens", type=int, default=2048)
+    parser.add_argument("--max-new-tokens", type=int, default=4096,
+                         help="a dense page's full bbox-JSON enumeration can need more than a smaller default - "
+                              "if you see truncated/invalid JSON on dense pages, raise this further")
+    parser.add_argument("--no-repeat-ngram-size", type=int, default=4,
+                         help="blocks verbatim n-gram repeats to prevent the repetition-loop failure mode on "
+                              "hard/ambiguous pages - see run_prompt's docstring comment. 0 to disable.")
     parser.add_argument("--device", default=None, help="default: cpu (MPS crashes on this model - see docstring)")
     parser.add_argument("--dtype", choices=["bfloat16", "float16", "float32"], default=None,
                          help="default: bfloat16 on cuda, float32 elsewhere")
@@ -167,7 +183,9 @@ def main():
 
             if image is None or image_src != src:
                 image, image_src = Image.open(src).convert("RGB"), src
-            text, elapsed = run_prompt(model, processor, device, image, prompts[mode], args.max_new_tokens)
+            text, elapsed = run_prompt(
+                model, processor, device, image, prompts[mode], args.max_new_tokens, args.no_repeat_ngram_size
+            )
             n_done += 1
 
             if dst:

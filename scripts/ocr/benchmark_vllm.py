@@ -37,7 +37,24 @@ Then, in a separate terminal on the same box:
     # through the vLLM server instead of a local transformers.generate()
     # loop.
     python scripts/ocr/benchmark_vllm.py --input-dir data/images \\
-        --output-dir data/ocr_qwen_vllm --concurrency 16 --mode both
+        --output-dir data/ocr_qwen_vllm --concurrency 32 --mode both
+
+Using both A10s: don't put both GPUs in one `vllm serve` process unless
+you also add --tensor-parallel-size 2 - and even then, for a model that
+already fits on one GPU (this one does), that just adds cross-GPU
+communication overhead for no benefit. Better: two independent servers,
+one per GPU (zero cross-GPU communication, throughput roughly doubles),
+each fed its own shard of the image list via --shard:
+
+    CUDA_VISIBLE_DEVICES=0 vllm serve Qwen/Qwen2.5-VL-3B-Instruct --port 8000 ...
+    CUDA_VISIBLE_DEVICES=1 vllm serve Qwen/Qwen2.5-VL-3B-Instruct --port 8001 ...
+
+    python scripts/ocr/benchmark_vllm.py --input-dir data/images \\
+        --output-dir data/ocr_qwen_vllm --concurrency 32 --mode both \\
+        --base-url http://localhost:8000/v1 --shard 0/2 &
+    python scripts/ocr/benchmark_vllm.py --input-dir data/images \\
+        --output-dir data/ocr_qwen_vllm --concurrency 32 --mode both \\
+        --base-url http://localhost:8001/v1 --shard 1/2 &
 """
 
 from __future__ import annotations
@@ -58,9 +75,11 @@ PROMPTS = {"markdown": MARKDOWN_PROMPT, "bbox": BBOX_PROMPT}
 
 
 async def ocr_one(
-    client: AsyncOpenAI, semaphore: asyncio.Semaphore, model: str, image_path: Path, prompt: str, max_tokens: int,
+    client: AsyncOpenAI, semaphore: asyncio.Semaphore, model: str, image_path: Path, prompt: str, gen_kwargs: dict,
 ) -> tuple[str | None, float, str | None]:
-    """Returns (text, elapsed, error) - error is None on success."""
+    """Returns (text, elapsed, error) - error is None on success. gen_kwargs:
+    see build_gen_kwargs - max_tokens, frequency_penalty (standard OpenAI
+    field), and repetition_penalty (vLLM extension, via extra_body)."""
     messages = [
         {
             "role": "user",
@@ -74,7 +93,7 @@ async def ocr_one(
         t0 = time.time()
         try:
             response = await client.chat.completions.create(
-                model=model, messages=messages, max_tokens=max_tokens, temperature=0,
+                model=model, messages=messages, temperature=0, **gen_kwargs,
             )
             elapsed = time.time() - t0
             return response.choices[0].message.content, elapsed, None
@@ -82,14 +101,33 @@ async def ocr_one(
             return None, time.time() - t0, repr(e)
 
 
+def build_gen_kwargs(max_tokens: int, frequency_penalty: float, repetition_penalty: float) -> dict:
+    """frequency_penalty and repetition_penalty are two different (and
+    combinable) mechanisms for discouraging the repeat-the-same-chunk
+    failure mode a small model under greedy decoding is prone to on
+    hard/ambiguous pages - see run_qwen_vl.py's --no-repeat-ngram-size
+    docstring for the underlying cause (this is the vLLM/OpenAI-API
+    equivalent mitigation, not available as an exact no_repeat_ngram_size
+    match through this API). frequency_penalty (standard OpenAI field,
+    logit-additive, scales with how often a token already appeared) is
+    always sent; repetition_penalty (vLLM extension via extra_body,
+    logit-multiplicative, binary already-appeared-or-not) is only added if
+    non-default (1.0 = off), so a plain request still works against a
+    vLLM version that doesn't support it."""
+    gen_kwargs = {"max_tokens": max_tokens, "frequency_penalty": frequency_penalty}
+    if repetition_penalty != 1.0:
+        gen_kwargs["extra_body"] = {"repetition_penalty": repetition_penalty}
+    return gen_kwargs
+
+
 async def run_batch(
-    client: AsyncOpenAI, model: str, jobs: list[tuple[Path, str]], concurrency: int, max_tokens: int,
+    client: AsyncOpenAI, model: str, jobs: list[tuple[Path, str]], concurrency: int, gen_kwargs: dict,
 ) -> list[tuple[str | None, float, str | None]]:
     """jobs: [(image_path, prompt)]. Runs all of them with at most
     `concurrency` in flight at once - this concurrency, not the request
     count, is what lets vLLM's continuous batching actually kick in."""
     semaphore = asyncio.Semaphore(concurrency)
-    tasks = [ocr_one(client, semaphore, model, path, prompt, max_tokens) for path, prompt in jobs]
+    tasks = [ocr_one(client, semaphore, model, path, prompt, gen_kwargs) for path, prompt in jobs]
     return await asyncio.gather(*tasks)
 
 
@@ -108,7 +146,7 @@ def summarize(results: list[tuple[str | None, float, str | None]], wall_time: fl
 
 
 async def benchmark(client: AsyncOpenAI, model: str, images: list[Path], modes: list[str],
-                     concurrency_levels: list[int], max_tokens: int) -> None:
+                     concurrency_levels: list[int], gen_kwargs: dict) -> None:
     jobs = [(path, PROMPTS[mode]) for path in images for mode in modes]
     print(f"{len(images)} image(s) x {len(modes)} mode(s) = {len(jobs)} request(s) per concurrency level\n")
 
@@ -117,7 +155,7 @@ async def benchmark(client: AsyncOpenAI, model: str, images: list[Path], modes: 
     print("-" * len(header))
     for concurrency in concurrency_levels:
         t0 = time.time()
-        results = await run_batch(client, model, jobs, concurrency, max_tokens)
+        results = await run_batch(client, model, jobs, concurrency, gen_kwargs)
         wall_time = time.time() - t0
         s = summarize(results, wall_time)
         print(
@@ -132,7 +170,7 @@ async def benchmark(client: AsyncOpenAI, model: str, images: list[Path], modes: 
 
 
 async def production_run(client: AsyncOpenAI, model: str, pairs: list[tuple[Path, Path]], modes: list[str],
-                          output_dir: Path, concurrency: int, max_tokens: int, force: bool) -> None:
+                          output_dir: Path, concurrency: int, gen_kwargs: dict, force: bool) -> None:
     jobs = []  # (src, relative_path, mode, dst)
     for src, relative_path in pairs:
         for mode in modes:
@@ -149,7 +187,7 @@ async def production_run(client: AsyncOpenAI, model: str, pairs: list[tuple[Path
     semaphore = asyncio.Semaphore(concurrency)
 
     async def process(src, relative_path, mode, dst):
-        text, elapsed, error = await ocr_one(client, semaphore, model, src, PROMPTS[mode], max_tokens)
+        text, elapsed, error = await ocr_one(client, semaphore, model, src, PROMPTS[mode], gen_kwargs)
         if error:
             print(f"[FAILED] [{mode}] {src}: {error}")
             return
@@ -181,7 +219,24 @@ def main():
                          help="one value in production mode, one or more (a sweep) in benchmark mode")
     parser.add_argument("--model", default="Qwen/Qwen2.5-VL-3B-Instruct", help="must match what vllm serve is running")
     parser.add_argument("--base-url", default="http://localhost:8000/v1")
-    parser.add_argument("--max-tokens", type=int, default=2048)
+    parser.add_argument("--max-tokens", type=int, default=4096,
+                         help="a dense page's full bbox-JSON enumeration (one text+bbox_2d entry per detected "
+                              "block) can need more than the default chat-completion length - if you see "
+                              "truncated/invalid JSON on dense pages, raise this further")
+    parser.add_argument("--frequency-penalty", type=float, default=0.3,
+                         help="discourages the repeat-the-same-chunk failure mode greedy decoding is prone to "
+                              "on hard/ambiguous pages, especially with a smaller model - standard OpenAI field, "
+                              "0=off, higher=stronger. See build_gen_kwargs.")
+    parser.add_argument("--repetition-penalty", type=float, default=1.0,
+                         help="a second, complementary repetition mitigation (vLLM-specific, via extra_body) - "
+                              "1.0=off. Try ~1.1-1.3 in addition to --frequency-penalty if repetition persists.")
+    parser.add_argument("--shard", default=None, metavar="I/N",
+                         help="production mode with two (or more) independent vllm servers, one per GPU: run "
+                              "this script once per server, each with a different I (0-indexed) and the same N "
+                              "(total server count) and --base-url pointed at its own server, e.g. --shard 0/2 "
+                              "against port 8000 and --shard 1/2 against port 8001. Splits the image list with a "
+                              "strided slice (pairs[I::N]) rather than a contiguous chunk, so a run of similar "
+                              "(e.g. same-dossier) pages doesn't all land on one shard.")
     args = parser.parse_args()
 
     if args.output_dir and len(args.concurrency) != 1:
@@ -189,19 +244,24 @@ def main():
 
     modes = ["markdown", "bbox"] if args.mode == "both" else [args.mode]
     client = AsyncOpenAI(api_key="EMPTY", base_url=args.base_url)
+    gen_kwargs = build_gen_kwargs(args.max_tokens, args.frequency_penalty, args.repetition_penalty)
+    pairs = collect_images(args.images, args.input_dir)
+
+    if args.shard:
+        shard_index, shard_count = (int(x) for x in args.shard.split("/"))
+        pairs = pairs[shard_index::shard_count]
+        print(f"shard {shard_index}/{shard_count}: {len(pairs)} image(s) assigned to this run")
 
     if args.output_dir:
-        pairs = collect_images(args.images, args.input_dir)
         asyncio.run(production_run(
-            client, args.model, pairs, modes, args.output_dir, args.concurrency[0], args.max_tokens, args.force
+            client, args.model, pairs, modes, args.output_dir, args.concurrency[0], gen_kwargs, args.force
         ))
     else:
-        pairs = collect_images(args.images, args.input_dir)
         images = [src for src, _ in pairs]
         if args.sample and args.sample < len(images):
             random.Random(args.seed).shuffle(images)
             images = images[: args.sample]
-        asyncio.run(benchmark(client, args.model, images, modes, args.concurrency, args.max_tokens))
+        asyncio.run(benchmark(client, args.model, images, modes, args.concurrency, gen_kwargs))
 
 
 if __name__ == "__main__":
