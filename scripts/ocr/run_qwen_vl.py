@@ -78,13 +78,18 @@ def pick_device(requested: str | None) -> str:
 
 def load_model(model_id: str, device: str, dtype: str | None, attn_implementation: str | None,
                 min_pixels: int | None, max_pixels: int | None):
+    # startswith, not ==: "cuda:0"/"cuda:1" (needed to target a specific
+    # GPU, e.g. for running one worker per A10) would otherwise silently
+    # miss these defaults and fall through to the cpu/mps ones - fp32 +
+    # eager attention - which is exactly what caused the earlier OOM.
+    is_cuda = device.startswith("cuda")
     if dtype is None:
-        dtype = "bfloat16" if device == "cuda" else "float32"
+        dtype = "bfloat16" if is_cuda else "float32"
     if attn_implementation is None:
         # eager is the only thing guaranteed to work on cpu/mps; sdpa (built
         # into torch, no extra install) avoids eager's O(n^2) materialized
         # attention matrix and is the right default once on CUDA.
-        attn_implementation = "sdpa" if device == "cuda" else "eager"
+        attn_implementation = "sdpa" if is_cuda else "eager"
 
     t0 = time.time()
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(

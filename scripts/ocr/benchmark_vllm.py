@@ -1,0 +1,208 @@
+"""
+Benchmarks (and can also drive a real production run of) Qwen2.5-VL OCR
+through a vLLM server's OpenAI-compatible API, instead of the one-page-at-
+a-time transformers.generate() loop in run_qwen_vl.py. vLLM's continuous
+batching lets many pages' decoding overlap on the GPU concurrently rather
+than finishing one page's full generate() call before starting the next -
+the whole point of this script is to measure how much that's actually
+worth for this workload, at a few different concurrency levels, before
+committing the full 114K-page run to it.
+
+Not runnable here (no CUDA locally) - written against vLLM's documented
+OpenAI-compatible API and smoke-tested for import/argument-parsing
+correctness only. Verify the request/response handling against a real
+server before trusting it for the full run.
+
+Setup (on the A10 box - vLLM needs CUDA, do this there, not here):
+    pip install vllm openai
+
+    # Single GPU first, to isolate vLLM's own effect from the second-GPU
+    # doubling you already get from running two independent servers (see
+    # run_qwen_vl.py's CUDA_VISIBLE_DEVICES notes) - add the second GPU as
+    # a follow-up once this number looks good on its own.
+    CUDA_VISIBLE_DEVICES=0 vllm serve Qwen/Qwen2.5-VL-3B-Instruct \\
+        --port 8000 --dtype bfloat16 --limit-mm-per-prompt image=1 \\
+        --allowed-local-media-path /path/to/your/dossier/images
+
+Then, in a separate terminal on the same box:
+
+    # Benchmark mode (--output-dir omitted): sweep concurrency levels over
+    # a sample, print a pages/sec + latency comparison table, write nothing.
+    python scripts/ocr/benchmark_vllm.py --input-dir /path/to/dossier/images \\
+        --sample 200 --seed 0 --concurrency 1 4 8 16 32
+
+    # Production mode (--output-dir given, exactly one --concurrency value):
+    # writes output files exactly like run_qwen_vl.py does (same
+    # --mode/--output-dir mirroring/skip-if-up-to-date behavior), just
+    # through the vLLM server instead of a local transformers.generate()
+    # loop.
+    python scripts/ocr/benchmark_vllm.py --input-dir data/images \\
+        --output-dir data/ocr_qwen_vllm --concurrency 16 --mode both
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import random
+import statistics
+import time
+from pathlib import Path
+
+from openai import AsyncOpenAI
+
+from io_utils import collect_images, is_up_to_date, output_path
+from run_qwen_vl import BBOX_PROMPT, MARKDOWN_PROMPT, OUTPUT_SUFFIX
+
+PROMPTS = {"markdown": MARKDOWN_PROMPT, "bbox": BBOX_PROMPT}
+
+
+async def ocr_one(
+    client: AsyncOpenAI, semaphore: asyncio.Semaphore, model: str, image_path: Path, prompt: str, max_tokens: int,
+) -> tuple[str | None, float, str | None]:
+    """Returns (text, elapsed, error) - error is None on success."""
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": f"file://{image_path.resolve()}"}},
+            ],
+        }
+    ]
+    async with semaphore:
+        t0 = time.time()
+        try:
+            response = await client.chat.completions.create(
+                model=model, messages=messages, max_tokens=max_tokens, temperature=0,
+            )
+            elapsed = time.time() - t0
+            return response.choices[0].message.content, elapsed, None
+        except Exception as e:
+            return None, time.time() - t0, repr(e)
+
+
+async def run_batch(
+    client: AsyncOpenAI, model: str, jobs: list[tuple[Path, str]], concurrency: int, max_tokens: int,
+) -> list[tuple[str | None, float, str | None]]:
+    """jobs: [(image_path, prompt)]. Runs all of them with at most
+    `concurrency` in flight at once - this concurrency, not the request
+    count, is what lets vLLM's continuous batching actually kick in."""
+    semaphore = asyncio.Semaphore(concurrency)
+    tasks = [ocr_one(client, semaphore, model, path, prompt, max_tokens) for path, prompt in jobs]
+    return await asyncio.gather(*tasks)
+
+
+def summarize(results: list[tuple[str | None, float, str | None]], wall_time: float) -> dict:
+    latencies = [elapsed for _, elapsed, error in results if error is None]
+    n_failed = sum(1 for _, _, error in results if error is not None)
+    return {
+        "n": len(results),
+        "n_failed": n_failed,
+        "wall_time": wall_time,
+        "pages_per_sec": len(results) / wall_time if wall_time > 0 else float("nan"),
+        "latency_mean": statistics.mean(latencies) if latencies else float("nan"),
+        "latency_median": statistics.median(latencies) if latencies else float("nan"),
+        "latency_p95": statistics.quantiles(latencies, n=20)[18] if len(latencies) >= 20 else max(latencies, default=float("nan")),
+    }
+
+
+async def benchmark(client: AsyncOpenAI, model: str, images: list[Path], modes: list[str],
+                     concurrency_levels: list[int], max_tokens: int) -> None:
+    jobs = [(path, PROMPTS[mode]) for path in images for mode in modes]
+    print(f"{len(images)} image(s) x {len(modes)} mode(s) = {len(jobs)} request(s) per concurrency level\n")
+
+    header = f"{'concurrency':>11} | {'pages/sec':>10} | {'wall_time':>10} | {'latency mean/median/p95 (s)':>28} | failed"
+    print(header)
+    print("-" * len(header))
+    for concurrency in concurrency_levels:
+        t0 = time.time()
+        results = await run_batch(client, model, jobs, concurrency, max_tokens)
+        wall_time = time.time() - t0
+        s = summarize(results, wall_time)
+        print(
+            f"{concurrency:>11} | {s['pages_per_sec']:>10.2f} | {s['wall_time']:>9.1f}s | "
+            f"{s['latency_mean']:>7.1f} / {s['latency_median']:>7.1f} / {s['latency_p95']:>7.1f}   | {s['n_failed']}"
+        )
+    print(
+        "\nFor reference, the earlier one-page-at-a-time transformers.generate() run measured "
+        "10-35s/page (markdown) and 18-65s/page (bbox) on a single A10 - compare pages/sec above "
+        "against 1/35 ~= 0.03 and 1/65 ~= 0.015 pages/sec as the naive baseline."
+    )
+
+
+async def production_run(client: AsyncOpenAI, model: str, pairs: list[tuple[Path, Path]], modes: list[str],
+                          output_dir: Path, concurrency: int, max_tokens: int, force: bool) -> None:
+    jobs = []  # (src, relative_path, mode, dst)
+    for src, relative_path in pairs:
+        for mode in modes:
+            dst = output_path(output_dir, relative_path, OUTPUT_SUFFIX[mode])
+            if not force and is_up_to_date(src, dst):
+                continue
+            jobs.append((src, relative_path, mode, dst))
+
+    n_skipped = len(pairs) * len(modes) - len(jobs)
+    print(f"{len(jobs)} output(s) to generate, {n_skipped} already up to date (skipped)")
+    if not jobs:
+        return
+
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def process(src, relative_path, mode, dst):
+        text, elapsed, error = await ocr_one(client, semaphore, model, src, PROMPTS[mode], max_tokens)
+        if error:
+            print(f"[FAILED] [{mode}] {src}: {error}")
+            return
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text(text)
+        print(f"[{elapsed:.1f}s] [{mode}] {src} -> {dst}")
+
+    t0 = time.time()
+    await asyncio.gather(*(process(*job) for job in jobs))
+    wall_time = time.time() - t0
+    print(f"\n{len(jobs)} output(s) generated in {wall_time:.1f}s ({len(jobs) / wall_time:.2f} req/s)")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--images", type=Path, nargs="+", help="explicit list of image files")
+    source.add_argument("--input-dir", type=Path, help="recursively OCR every image under this directory")
+    parser.add_argument("--output-dir", type=Path, default=None,
+                         help="production mode: write output files (needs exactly one --concurrency value). "
+                              "Omit for benchmark mode: sweep --concurrency levels, print stats, write nothing.")
+    parser.add_argument("--force", action="store_true", help="production mode: reprocess up-to-date pages too")
+    parser.add_argument("--sample", type=int, default=None,
+                         help="randomly sample this many images (benchmark mode - a full-corpus sweep would "
+                              "defeat the point of a quick benchmark)")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--mode", choices=["markdown", "bbox", "both"], default="both")
+    parser.add_argument("--concurrency", type=int, nargs="+", default=[8],
+                         help="one value in production mode, one or more (a sweep) in benchmark mode")
+    parser.add_argument("--model", default="Qwen/Qwen2.5-VL-3B-Instruct", help="must match what vllm serve is running")
+    parser.add_argument("--base-url", default="http://localhost:8000/v1")
+    parser.add_argument("--max-tokens", type=int, default=2048)
+    args = parser.parse_args()
+
+    if args.output_dir and len(args.concurrency) != 1:
+        raise SystemExit("--output-dir (production mode) needs exactly one --concurrency value, not a sweep")
+
+    modes = ["markdown", "bbox"] if args.mode == "both" else [args.mode]
+    client = AsyncOpenAI(api_key="EMPTY", base_url=args.base_url)
+
+    if args.output_dir:
+        pairs = collect_images(args.images, args.input_dir)
+        asyncio.run(production_run(
+            client, args.model, pairs, modes, args.output_dir, args.concurrency[0], args.max_tokens, args.force
+        ))
+    else:
+        pairs = collect_images(args.images, args.input_dir)
+        images = [src for src, _ in pairs]
+        if args.sample and args.sample < len(images):
+            random.Random(args.seed).shuffle(images)
+            images = images[: args.sample]
+        asyncio.run(benchmark(client, args.model, images, modes, args.concurrency, args.max_tokens))
+
+
+if __name__ == "__main__":
+    main()
