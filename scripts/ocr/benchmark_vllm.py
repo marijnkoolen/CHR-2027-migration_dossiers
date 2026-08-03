@@ -74,20 +74,34 @@ from run_qwen_vl import BBOX_PROMPT, MARKDOWN_PROMPT, OUTPUT_SUFFIX
 PROMPTS = {"markdown": MARKDOWN_PROMPT, "bbox": BBOX_PROMPT}
 
 # Constrains bbox-mode generation to guaranteed-valid JSON matching this
-# shape (vLLM's guided decoding masks out any token that would violate it,
-# rather than just prompting the model to comply) - see --guided-json.
-# Doesn't itself guarantee *completeness* on the densest pages (a
-# max_tokens cutoff can still truncate mid-array), only syntactic validity.
+# shape (vLLM's structured-outputs decoding masks out any token that would
+# violate it, rather than just prompting the model to comply) - see
+# --guided-json. Doesn't itself guarantee *completeness* on the densest
+# pages (a max_tokens cutoff can still truncate mid-array), only syntactic
+# validity.
+#
+# Root must be an "object", not a bare "array" - both OpenAI's and vLLM's
+# json_schema response_format require this (a bare-array root schema is
+# rejected/unsupported), so the array is wrapped under "detections" here.
+# This changes bbox mode's on-disk output shape from a plain [...] array to
+# {"detections": [...]}  - update any downstream JSON consumers (including
+# your own validity-checking script) accordingly when --guided-json is on.
 BBOX_JSON_SCHEMA = {
-    "type": "array",
-    "items": {
-        "type": "object",
-        "properties": {
-            "text": {"type": "string"},
-            "bbox_2d": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4},
+    "type": "object",
+    "properties": {
+        "detections": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "bbox_2d": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4},
+                },
+                "required": ["text", "bbox_2d"],
+            },
         },
-        "required": ["text", "bbox_2d"],
     },
+    "required": ["detections"],
 }
 
 
@@ -134,25 +148,36 @@ def build_gen_kwargs(
     non-default (1.0 = off), so a plain request still works against a
     vLLM version that doesn't support it.
 
-    guided_json (bbox mode only): adds vLLM's guided_json extra_body
-    param, constraining generation so it's *guaranteed* syntactically
-    valid JSON matching BBOX_JSON_SCHEMA - fixes genuine malformed JSON
-    (bad nesting, dropped commas, stray prose/markdown fences around the
-    array), a different problem from truncation-driven incompleteness on
-    the densest pages, which this doesn't fix (that needs more
-    --max-tokens headroom instead - see that flag's help). Needs the vLLM
-    server to have a guided-decoding backend enabled - if requests start
-    erroring after turning this on, check `vllm serve --help | grep -i
-    guided` on your version and add e.g. --guided-decoding-backend
-    xgrammar to the server launch command."""
+    guided_json (bbox mode only): constrains generation so it's
+    *guaranteed* syntactically valid JSON matching BBOX_JSON_SCHEMA - fixes
+    genuine malformed JSON (bad nesting, dropped commas, missing required
+    keys, stray prose/markdown fences around it), a different problem from
+    truncation-driven incompleteness on the densest pages, which this
+    doesn't fix (that needs more --max-tokens headroom instead - see that
+    flag's help).
+
+    Uses the standard OpenAI response_format={"type": "json_schema", ...}
+    field, NOT extra_body={"guided_json": ...} - the guided_* parameters
+    (and the --guided-decoding-backend server flag) were removed in vLLM
+    0.12.0 in favor of this unified "structured outputs" mechanism. The
+    default server-side backend is "auto" (picks an appropriate backend
+    per-request), so no server flag should be needed - if requests error,
+    check `vllm serve --help | grep structured-outputs` on your version and
+    add e.g. --structured-outputs-config.backend xgrammar explicitly.
+
+    Because a json_schema response_format's root must be an "object" (a
+    bare top-level "array" schema isn't supported), BBOX_JSON_SCHEMA wraps
+    the detections array under a "detections" key - bbox mode's on-disk
+    output is {"detections": [...]}  when this is on, not a plain [...]
+    array; update downstream consumers accordingly."""
     gen_kwargs = {"max_tokens": max_tokens, "frequency_penalty": frequency_penalty}
-    extra_body = {}
     if repetition_penalty != 1.0:
-        extra_body["repetition_penalty"] = repetition_penalty
+        gen_kwargs["extra_body"] = {"repetition_penalty": repetition_penalty}
     if guided_json and mode == "bbox":
-        extra_body["guided_json"] = BBOX_JSON_SCHEMA
-    if extra_body:
-        gen_kwargs["extra_body"] = extra_body
+        gen_kwargs["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {"name": "bbox_detections", "schema": BBOX_JSON_SCHEMA},
+        }
     return gen_kwargs
 
 
@@ -269,11 +294,12 @@ def main():
                          help="a second, complementary repetition mitigation (vLLM-specific, via extra_body) - "
                               "1.0=off. Try ~1.1-1.3 in addition to --frequency-penalty if repetition persists.")
     parser.add_argument("--guided-json", action=argparse.BooleanOptionalAction, default=True,
-                         help="bbox mode only: constrain generation to guaranteed-valid JSON via vLLM's "
-                              "guided_json (see build_gen_kwargs) - fixes genuinely malformed JSON, not "
-                              "truncation-driven incompleteness (that's --max-tokens). Needs a guided-decoding "
-                              "backend enabled server-side; use --no-guided-json if your vLLM version errors "
-                              "on the extra_body field.")
+                         help="bbox mode only: constrain generation to guaranteed-valid JSON via a "
+                              "response_format json_schema (see build_gen_kwargs) - fixes genuinely malformed "
+                              "JSON, not truncation-driven incompleteness (that's --max-tokens). Changes bbox "
+                              "mode's on-disk output to {\"detections\": [...]}  instead of a bare [...] array "
+                              "- update downstream consumers. Use --no-guided-json to fall back to unconstrained "
+                              "generation if your vLLM version rejects response_format for this model.")
     parser.add_argument("--shard", default=None, metavar="I/N",
                          help="production mode with two (or more) independent vllm servers, one per GPU: run "
                               "this script once per server, each with a different I (0-indexed) and the same N "
