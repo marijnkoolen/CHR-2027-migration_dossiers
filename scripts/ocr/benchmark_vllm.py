@@ -73,6 +73,23 @@ from run_qwen_vl import BBOX_PROMPT, MARKDOWN_PROMPT, OUTPUT_SUFFIX
 
 PROMPTS = {"markdown": MARKDOWN_PROMPT, "bbox": BBOX_PROMPT}
 
+# Constrains bbox-mode generation to guaranteed-valid JSON matching this
+# shape (vLLM's guided decoding masks out any token that would violate it,
+# rather than just prompting the model to comply) - see --guided-json.
+# Doesn't itself guarantee *completeness* on the densest pages (a
+# max_tokens cutoff can still truncate mid-array), only syntactic validity.
+BBOX_JSON_SCHEMA = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string"},
+            "bbox_2d": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4},
+        },
+        "required": ["text", "bbox_2d"],
+    },
+}
+
 
 async def ocr_one(
     client: AsyncOpenAI, semaphore: asyncio.Semaphore, model: str, image_path: Path, prompt: str, gen_kwargs: dict,
@@ -101,7 +118,9 @@ async def ocr_one(
             return None, time.time() - t0, repr(e)
 
 
-def build_gen_kwargs(max_tokens: int, frequency_penalty: float, repetition_penalty: float) -> dict:
+def build_gen_kwargs(
+    max_tokens: int, frequency_penalty: float, repetition_penalty: float, mode: str, guided_json: bool,
+) -> dict:
     """frequency_penalty and repetition_penalty are two different (and
     combinable) mechanisms for discouraging the repeat-the-same-chunk
     failure mode a small model under greedy decoding is prone to on
@@ -113,21 +132,40 @@ def build_gen_kwargs(max_tokens: int, frequency_penalty: float, repetition_penal
     always sent; repetition_penalty (vLLM extension via extra_body,
     logit-multiplicative, binary already-appeared-or-not) is only added if
     non-default (1.0 = off), so a plain request still works against a
-    vLLM version that doesn't support it."""
+    vLLM version that doesn't support it.
+
+    guided_json (bbox mode only): adds vLLM's guided_json extra_body
+    param, constraining generation so it's *guaranteed* syntactically
+    valid JSON matching BBOX_JSON_SCHEMA - fixes genuine malformed JSON
+    (bad nesting, dropped commas, stray prose/markdown fences around the
+    array), a different problem from truncation-driven incompleteness on
+    the densest pages, which this doesn't fix (that needs more
+    --max-tokens headroom instead - see that flag's help). Needs the vLLM
+    server to have a guided-decoding backend enabled - if requests start
+    erroring after turning this on, check `vllm serve --help | grep -i
+    guided` on your version and add e.g. --guided-decoding-backend
+    xgrammar to the server launch command."""
     gen_kwargs = {"max_tokens": max_tokens, "frequency_penalty": frequency_penalty}
+    extra_body = {}
     if repetition_penalty != 1.0:
-        gen_kwargs["extra_body"] = {"repetition_penalty": repetition_penalty}
+        extra_body["repetition_penalty"] = repetition_penalty
+    if guided_json and mode == "bbox":
+        extra_body["guided_json"] = BBOX_JSON_SCHEMA
+    if extra_body:
+        gen_kwargs["extra_body"] = extra_body
     return gen_kwargs
 
 
 async def run_batch(
-    client: AsyncOpenAI, model: str, jobs: list[tuple[Path, str]], concurrency: int, gen_kwargs: dict,
+    client: AsyncOpenAI, model: str, jobs: list[tuple[Path, str, dict]], concurrency: int,
 ) -> list[tuple[str | None, float, str | None]]:
-    """jobs: [(image_path, prompt)]. Runs all of them with at most
-    `concurrency` in flight at once - this concurrency, not the request
-    count, is what lets vLLM's continuous batching actually kick in."""
+    """jobs: [(image_path, prompt, gen_kwargs)] - gen_kwargs varies per
+    mode (see build_gen_kwargs), hence bundled per-job rather than shared.
+    Runs all of them with at most `concurrency` in flight at once - this
+    concurrency, not the request count, is what lets vLLM's continuous
+    batching actually kick in."""
     semaphore = asyncio.Semaphore(concurrency)
-    tasks = [ocr_one(client, semaphore, model, path, prompt, gen_kwargs) for path, prompt in jobs]
+    tasks = [ocr_one(client, semaphore, model, path, prompt, gk) for path, prompt, gk in jobs]
     return await asyncio.gather(*tasks)
 
 
@@ -146,8 +184,8 @@ def summarize(results: list[tuple[str | None, float, str | None]], wall_time: fl
 
 
 async def benchmark(client: AsyncOpenAI, model: str, images: list[Path], modes: list[str],
-                     concurrency_levels: list[int], gen_kwargs: dict) -> None:
-    jobs = [(path, PROMPTS[mode]) for path in images for mode in modes]
+                     concurrency_levels: list[int], gen_kwargs_by_mode: dict[str, dict]) -> None:
+    jobs = [(path, PROMPTS[mode], gen_kwargs_by_mode[mode]) for path in images for mode in modes]
     print(f"{len(images)} image(s) x {len(modes)} mode(s) = {len(jobs)} request(s) per concurrency level\n")
 
     header = f"{'concurrency':>11} | {'pages/sec':>10} | {'wall_time':>10} | {'latency mean/median/p95 (s)':>28} | failed"
@@ -155,7 +193,7 @@ async def benchmark(client: AsyncOpenAI, model: str, images: list[Path], modes: 
     print("-" * len(header))
     for concurrency in concurrency_levels:
         t0 = time.time()
-        results = await run_batch(client, model, jobs, concurrency, gen_kwargs)
+        results = await run_batch(client, model, jobs, concurrency)
         wall_time = time.time() - t0
         s = summarize(results, wall_time)
         print(
@@ -170,7 +208,7 @@ async def benchmark(client: AsyncOpenAI, model: str, images: list[Path], modes: 
 
 
 async def production_run(client: AsyncOpenAI, model: str, pairs: list[tuple[Path, Path]], modes: list[str],
-                          output_dir: Path, concurrency: int, gen_kwargs: dict, force: bool) -> None:
+                          output_dir: Path, concurrency: int, gen_kwargs_by_mode: dict[str, dict], force: bool) -> None:
     jobs = []  # (src, relative_path, mode, dst)
     for src, relative_path in pairs:
         for mode in modes:
@@ -187,7 +225,7 @@ async def production_run(client: AsyncOpenAI, model: str, pairs: list[tuple[Path
     semaphore = asyncio.Semaphore(concurrency)
 
     async def process(src, relative_path, mode, dst):
-        text, elapsed, error = await ocr_one(client, semaphore, model, src, PROMPTS[mode], gen_kwargs)
+        text, elapsed, error = await ocr_one(client, semaphore, model, src, PROMPTS[mode], gen_kwargs_by_mode[mode])
         if error:
             print(f"[FAILED] [{mode}] {src}: {error}")
             return
@@ -230,6 +268,12 @@ def main():
     parser.add_argument("--repetition-penalty", type=float, default=1.0,
                          help="a second, complementary repetition mitigation (vLLM-specific, via extra_body) - "
                               "1.0=off. Try ~1.1-1.3 in addition to --frequency-penalty if repetition persists.")
+    parser.add_argument("--guided-json", action=argparse.BooleanOptionalAction, default=True,
+                         help="bbox mode only: constrain generation to guaranteed-valid JSON via vLLM's "
+                              "guided_json (see build_gen_kwargs) - fixes genuinely malformed JSON, not "
+                              "truncation-driven incompleteness (that's --max-tokens). Needs a guided-decoding "
+                              "backend enabled server-side; use --no-guided-json if your vLLM version errors "
+                              "on the extra_body field.")
     parser.add_argument("--shard", default=None, metavar="I/N",
                          help="production mode with two (or more) independent vllm servers, one per GPU: run "
                               "this script once per server, each with a different I (0-indexed) and the same N "
@@ -244,7 +288,10 @@ def main():
 
     modes = ["markdown", "bbox"] if args.mode == "both" else [args.mode]
     client = AsyncOpenAI(api_key="EMPTY", base_url=args.base_url)
-    gen_kwargs = build_gen_kwargs(args.max_tokens, args.frequency_penalty, args.repetition_penalty)
+    gen_kwargs_by_mode = {
+        mode: build_gen_kwargs(args.max_tokens, args.frequency_penalty, args.repetition_penalty, mode, args.guided_json)
+        for mode in modes
+    }
     pairs = collect_images(args.images, args.input_dir)
 
     if args.shard:
@@ -254,14 +301,14 @@ def main():
 
     if args.output_dir:
         asyncio.run(production_run(
-            client, args.model, pairs, modes, args.output_dir, args.concurrency[0], gen_kwargs, args.force
+            client, args.model, pairs, modes, args.output_dir, args.concurrency[0], gen_kwargs_by_mode, args.force
         ))
     else:
         images = [src for src, _ in pairs]
         if args.sample and args.sample < len(images):
             random.Random(args.seed).shuffle(images)
             images = images[: args.sample]
-        asyncio.run(benchmark(client, args.model, images, modes, args.concurrency, gen_kwargs))
+        asyncio.run(benchmark(client, args.model, images, modes, args.concurrency, gen_kwargs_by_mode))
 
 
 if __name__ == "__main__":
