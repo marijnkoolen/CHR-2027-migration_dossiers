@@ -1,5 +1,5 @@
 annotator	label	preferred_label
-Marijke	Consent wife 	Testmonial status (Application Documents)
+Marijke	Consent wife 	Testimonial status (Application Documents)
 Marijke	Form APS (Assisted Passage Scheme)	Form APS (Assisted Passage Scheme)
 Marijke	Form G.2 HAG (visa)	Form G.2 HAG (visa)
 Marijke	Letter about procedure (Application Documents)	Letter about procedure
@@ -8,24 +8,24 @@ Marijke	Letter about procedure (Qualification & Employment Proof)	Letter about p
 Marijke	Letter about procedure (Security & Political Screening Documents)	Letter about procedure
 Marijke	Nominal Roll (excerpt)	Form (Other)
 Marijke	Report selection officer XS (Landing Permit)	Report of selection and medical officers
-Marijke	Testimonial divorce (Application Documents)	Testmonial status (Application Documents)
-Marijke	Testimonial good conduct (Security & Political Screening Documents)	Testmonial status (Application Documents)
+Marijke	Testimonial divorce (Application Documents)	Testimonial status (Application Documents)
+Marijke	Testimonial good conduct (Security & Political Screening Documents)	Testimonial status (Application Documents)
 Marijke	Trade Pro forma	Form No. 136 (Trade Pro Forma)
 Rik	D2 (predecessor model 60)	D.2
 Rik	Information on Professional Qualifications in the Netherlands	Form No. 63 (Rijksarbeidsbureau - Qualifications)
 Rik	Letter Voogdij (Other)	Letter (Other)
-Rik	Letter testimonial (Medical & Health Documents)	Testmonial status (Application Documents)
-Rik	Letter testimonial (Other)	Testmonial status (Application Documents)
+Rik	Letter testimonial (Medical & Health Documents)	Testimonial status (Application Documents)
+Rik	Letter testimonial (Other)	Testimonial status (Application Documents)
 Rik	Onbekend	Form (Other)
 Rik	Service Declaration	Testimonial labour (Qualification & Employment Proof)
-Yeqian	Divorce certificate	Testmonial status (Application Documents)
+Yeqian	Divorce certificate	Testimonial status (Application Documents)
 Yeqian	Form K	Form K
 Yeqian	accommodation proof	Testimonial status (Application Documents)
 Yeqian	change surname certificate	Testimonial status (Application Documents)
 Yeqian	check required of period in germany	Letter about procedure (Security & Political Screening Documents)
-Yeqian	consent of father	Testmonial status (Application Documents)
-Yeqian	divorce proof	Testmonial status (Application Documents)
-Yeqian	divorce proof? wealth proof?	Testmonial status (Application Documents)
+Yeqian	consent of father	Testimonial status (Application Documents)
+Yeqian	divorce proof	Testimonial status (Application Documents)
+Yeqian	divorce proof? wealth proof?	Testimonial status (Application Documents)
 Yeqian	handwritten memo	Letter (Other)
 Yeqian	letter content extract	Letter (Other)
 Yeqian	letter inquire medical investigation	Letter (Other)

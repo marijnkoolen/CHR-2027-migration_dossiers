@@ -20,6 +20,15 @@ vocabulary is just ignored during evaluation). If split_col isn't given or
 isn't present (e.g. run on merge_annotations.py's output, upstream of any
 split assignment), rarity is determined from every row instead.
 
+--count-by {pages,pdfs} (default pages) picks what "rare" is counted in.
+pages (the default) targets learnability - a class needs enough labeled
+examples to be worth its own head output. pdfs targets split-assignment
+feasibility instead: a class split across only 1-2 distinct PDFs can never
+appear in all of train/val/test no matter how splits are assigned (a PDF's
+pages all go to one split), regardless of how many total pages it has -
+use this before assign_stratified_splits.py, so every remaining class has
+enough distinct PDFs to plausibly be distributed across all three splits.
+
 Each rare doctype is merged into "Other ({layout_type}, {functional_category})"
 using its own (dominant) layout/functional combination - not one flat
 "Other" bucket - so classes that are rare for different reasons (e.g. a
@@ -50,19 +59,29 @@ import pandas as pd
 
 def merge_rare_doctypes(
     manifest: pd.DataFrame, doctype_col: str, layout_col: str, functional_col: str, split_col: str | None,
-    min_count: int = 10,
+    min_count: int = 10, count_by: str = "pages", pdf_col: str | None = None,
 ) -> tuple[pd.DataFrame, dict[str, str]]:
     """Returns (manifest with document_type remapped for rare classes,
     {original_doctype: merged_label} for only the classes actually merged).
 
     split_col: if given and present in `manifest`, rarity is counted from
     split=="train" rows only. Otherwise (None, or the column doesn't exist -
-    e.g. this manifest predates split assignment) every row counts."""
+    e.g. this manifest predates split assignment) every row counts.
+
+    count_by: "pages" (default) counts rows; "pdfs" counts distinct PDFs
+    (requires pdf_col) - see module docstring for when to use which."""
+    if count_by not in ("pages", "pdfs"):
+        raise ValueError(f"count_by must be 'pages' or 'pdfs', got {count_by!r}")
+    if count_by == "pdfs" and not pdf_col:
+        raise ValueError("count_by='pdfs' requires pdf_col")
+
     if split_col and split_col in manifest.columns:
         count_rows = manifest[manifest[split_col] == "train"]
     else:
         count_rows = manifest
-    train_counts = count_rows[doctype_col].value_counts()
+    train_counts = (
+        count_rows.groupby(doctype_col)[pdf_col].nunique() if count_by == "pdfs" else count_rows[doctype_col].value_counts()
+    )
     rare = set(train_counts[train_counts < min_count].index)
 
     mapping = {}
@@ -83,9 +102,12 @@ def main():
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--min-count", type=int, default=10,
-                         help="doctype classes with fewer than this many TRAIN examples get merged. Default 10 "
-                              "matches what was found empirically here: 17/36 classes had under 10 train "
-                              "examples, 12 had under 5.")
+                         help="doctype classes with fewer than this many TRAIN examples (pages, or PDFs if "
+                              "--count-by pdfs) get merged. Default 10 matches what was found empirically here "
+                              "for pages: 17/36 classes had under 10 train examples, 12 had under 5.")
+    parser.add_argument("--count-by", choices=["pages", "pdfs"], default="pages",
+                         help="what --min-count counts - see module docstring.")
+    parser.add_argument("--pdf-col", default="pdf_name", help="required when --count-by pdfs")
     parser.add_argument("--doctype-col", default="document_type")
     parser.add_argument("--layout-col", default="layout_type")
     parser.add_argument("--functional-col", default="functional_category")
@@ -111,18 +133,24 @@ def main():
     merged, mapping = merge_rare_doctypes(
         manifest, args.doctype_col, args.layout_col, args.functional_col,
         args.split_col if has_split else None, min_count=args.min_count,
+        count_by=args.count_by, pdf_col=args.pdf_col,
     )
 
+    unit = "PDFs" if args.count_by == "pdfs" else "examples"
     if not mapping:
-        print(f"no doctype classes had fewer than {args.min_count} examples - nothing to merge.")
+        print(f"no doctype classes had fewer than {args.min_count} {unit} - nothing to merge.")
     else:
         merged_into = {}
         for original, target in mapping.items():
             merged_into.setdefault(target, []).append(original)
-        print(f"merged {len(mapping)} rare classes (< {args.min_count} examples) into "
+        print(f"merged {len(mapping)} rare classes (< {args.min_count} {unit}) into "
               f"{len(merged_into)} bucket(s):")
         for target, originals in merged_into.items():
-            counts = manifest[manifest[args.doctype_col].isin(originals)].groupby(args.doctype_col).size()
+            rows = manifest[manifest[args.doctype_col].isin(originals)]
+            counts = (
+                rows.groupby(args.doctype_col)[args.pdf_col].nunique() if args.count_by == "pdfs"
+                else rows.groupby(args.doctype_col).size()
+            )
             detail = ", ".join(f"{o} ({counts.get(o, 0)})" for o in originals)
             print(f"  {target}  <-  {detail}")
 
