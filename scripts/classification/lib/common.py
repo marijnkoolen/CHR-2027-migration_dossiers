@@ -6,12 +6,103 @@ from __future__ import annotations
 
 import random
 from pathlib import Path
+from typing import Callable
 
 import pandas as pd
 import torch
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from torchvision import transforms
 from torchvision.datasets.folder import default_loader
+
+from markdown_text import extract_text as _extract_markdown_text
+from pagexml import extract_text as _extract_pagexml_text
+
+
+def get_text_extractor(text_source: str) -> Callable[[str], str]:
+    """extract_text(path) -> str for --text-source ("pagexml" or
+    "markdown") - shared by precompute_embeddings.py, train.py, and
+    predict.py so all three resolve a text source identically. pagexml:
+    PageXML transcriptions (lib/pagexml.py). markdown: Qwen2.5-VL
+    markdown-mode OCR output, stripped of markup (lib/markdown_text.py) -
+    see that module's docstring for why markup is stripped, and why
+    markdown is this project's default text source."""
+    if text_source == "markdown":
+        return _extract_markdown_text
+    if text_source == "pagexml":
+        return _extract_pagexml_text
+    raise ValueError(f"unknown text_source {text_source!r} - expected 'pagexml' or 'markdown'")
+
+
+def validate_manifest_paths(
+    manifest: pd.DataFrame, image_root: Path, image_col: str | None, text_col: str | None,
+    allow_missing: bool = False, max_examples: int = 10,
+) -> None:
+    """Checks every non-null path in image_col and text_col (pass None for
+    either to skip it - e.g. image_col=None for --modality text) resolves
+    to an existing file under image_root, before any (slow) model loading
+    or data extraction happens. Call this right after reading the manifest,
+    in every script that reads raw images/text (train.py, precompute_
+    embeddings.py) - NOT needed for train.py --cached-embeddings, which
+    never touches raw files at all.
+
+    Raises SystemExit listing example missing paths if any are found and
+    allow_missing is False (the default). This exists because silently
+    tolerating broken paths - which is what extract_text()'s "" fallback,
+    combined with only a >50%-empty-text WARNING, previously allowed - can
+    produce a manifest where every row's text is empty, and therefore every
+    text embedding is near-identical, without erroring at all; this project
+    has been bitten by exactly that failure mode more than once (see
+    precompute_embeddings.py's module docstring), from different root
+    causes each time (a wrong .txt/.xml path, and a wrong markdown OCR
+    path) - a strict, load-time check catches the general problem instead
+    of each specific instance of it after the fact.
+
+    A NaN/missing *value* in a column (no path given at all) is not an
+    error - some pages legitimately have no transcription (e.g. photos);
+    only a given, non-null path that doesn't resolve to an existing file is
+    treated as a mistake.
+
+    allow_missing=True downgrades this to a warning and continues - for
+    text_col, that's coherent (matches extract_text's own defined ""
+    fallback for a missing page); for image_col there's no such fallback
+    anywhere in this codebase, so allowing a missing image just defers the
+    failure to a harder-to-diagnose crash later, during actual data
+    loading, rather than avoiding it - allow_missing is meant for
+    tolerating a few genuinely-expected gaps, not as a way to skip fixing a
+    systematic path mistake."""
+    problems = []
+    for col in (image_col, text_col):
+        if not col or col not in manifest.columns:
+            continue
+        missing = [
+            str(image_root / p) for p in manifest[col]
+            if pd.notna(p) and not (image_root / p).exists()
+        ]
+        if missing:
+            problems.append((col, missing))
+
+    if not problems:
+        return
+
+    total_missing = sum(len(missing) for _, missing in problems)
+    lines = [f"{total_missing} file(s) referenced in the manifest do not exist on disk:"]
+    for col, missing in problems:
+        lines.append(f"  column {col!r}: {len(missing)} missing, e.g.:")
+        for p in missing[:max_examples]:
+            lines.append(f"    {p}")
+        if len(missing) > max_examples:
+            lines.append(f"    ... and {len(missing) - max_examples} more")
+    message = "\n".join(lines)
+
+    if allow_missing:
+        print(f"WARNING: {message}\n(continuing anyway - --allow-missing-files was set)")
+        return
+    raise SystemExit(
+        f"{message}\n\nThis usually means a wrong --image-root, a wrong --*-col, or (for text) a wrong "
+        f"--text-source/OCR output directory - fix the paths, or pass --allow-missing-files to proceed anyway "
+        f"(missing text paths fall back to empty text for that page; missing image paths will still fail "
+        f"later instead, when that page is actually loaded, since there's no fallback for a missing image)."
+    )
 
 
 def format_confusion_matrix(matrix: list[list[int]], labels: list[str]) -> str:

@@ -34,9 +34,8 @@ from transformers import AutoTokenizer
 
 sys.path.insert(0, str(Path(__file__).parent / "lib"))
 
-from common import build_transforms, pick_device
+from common import build_transforms, get_text_extractor, pick_device
 from models import MultimodalPageEmbedder, PageEmbedder, TextEmbedder
-from pagexml import extract_text
 from sequence_data import PageBudgetBatchSampler
 from sequence_model import SequenceContextModel
 
@@ -50,11 +49,13 @@ class InferencePageSequenceDataset(Dataset):
     image_col=None (text-only models): no image is ever loaded."""
 
     def __init__(self, manifest: pd.DataFrame, image_root: Path, transform,
-                 pdf_col: str, page_col: str, image_col: str | None, pagexml_col: str | None = None):
+                 pdf_col: str, page_col: str, image_col: str | None,
+                 text_col: str | None = None, text_extractor=None):
         self.image_root = Path(image_root)
         self.transform = transform
         self.image_col = image_col
-        self.pagexml_col = pagexml_col
+        self.text_col = text_col
+        self.text_extractor = text_extractor
         self.pdfs: list[pd.DataFrame] = [
             group.sort_values(page_col) for _, group in manifest.groupby(pdf_col, sort=False)
         ]
@@ -72,15 +73,15 @@ class InferencePageSequenceDataset(Dataset):
             images = torch.stack([self.transform(default_loader(p)) for p in paths])
         else:
             images = None
-        if self.pagexml_col:
+        if self.text_col:
             # No caching here (unlike sequence_data.PageSequenceDataset,
             # used for training): inference is one pass over the manifest,
-            # so every page's PageXML is read exactly once regardless - a
+            # so every page's text is read exactly once regardless - a
             # cache would only accumulate the whole corpus's extracted text
             # in memory for zero reuse benefit, which is exactly what was
             # driving memory usage into the tens of GB on large corpora.
             texts = [
-                extract_text(str(self.image_root / p)) if pd.notna(p) else "" for p in group[self.pagexml_col]
+                self.text_extractor(str(self.image_root / p)) if pd.notna(p) else "" for p in group[self.text_col]
             ]
         else:
             texts = [""] * len(group)
@@ -206,7 +207,12 @@ def main():
     parser.add_argument("--pdf-col", default="pdf_name")
     parser.add_argument("--page-col", default="page_num")
     parser.add_argument("--image-col", default="img_path")
+    parser.add_argument("--text-source", choices=["pagexml", "markdown"], default="markdown",
+                         help="markdown (default): Qwen2.5-VL markdown-mode OCR output, stripped of markup - see "
+                              "lib/markdown_text.py. pagexml: PageXML transcriptions, this project's original "
+                              "text source.")
     parser.add_argument("--pagexml-col", default="text_path")
+    parser.add_argument("--markdown-col", default="markdown_path", help="only used with --text-source markdown")
     parser.add_argument("--batch-size", type=int, default=8, help="PDFs per batch; ignored if --max-pages-per-batch is set")
     parser.add_argument("--max-pages-per-batch", type=int, default=None)
     parser.add_argument("--amp", choices=["auto", "on", "off"], default="auto")
@@ -229,10 +235,12 @@ def main():
     manifest = pd.read_csv(args.manifest, sep=sep)
     print(f"{len(manifest)} pages, {manifest[args.pdf_col].nunique()} PDFs to predict")
 
+    text_col = args.markdown_col if args.text_source == "markdown" else args.pagexml_col
     dataset = InferencePageSequenceDataset(
         manifest, args.image_root, build_transforms(config["image_size"], train=False),
         pdf_col=args.pdf_col, page_col=args.page_col, image_col=None if text_only else args.image_col,
-        pagexml_col=args.pagexml_col if (multimodal or text_only) else None,
+        text_col=text_col if (multimodal or text_only) else None,
+        text_extractor=get_text_extractor(args.text_source) if (multimodal or text_only) else None,
     )
     collate = make_inference_collate_fn(tokenizer, config["max_text_length"])
     if args.max_pages_per_batch:

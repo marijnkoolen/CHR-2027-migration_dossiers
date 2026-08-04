@@ -185,6 +185,8 @@ def merge(long_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     merged_df["_page_sort"] = pd.to_numeric(merged_df[PAGE_COL], errors="coerce")
     merged_df = merged_df.sort_values([IMAGE_COL, "_page_sort"]).drop(columns="_page_sort")
 
+    if 'pdf_name' not in merged_df.columns and IMAGE_COL in merged_df.columns:
+        merged_df = merged_df.rename(columns={IMAGE_COL: 'pdf_name'})
     disagreement_df = pd.DataFrame(disagreement_rows)
     return merged_df, disagreement_df
 

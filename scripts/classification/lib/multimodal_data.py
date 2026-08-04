@@ -1,18 +1,19 @@
 """Dataset for the late-fusion image+text classifier: pairs each page's
-image with the text extracted from its PageXML transcription."""
+image with its transcribed text (see common.get_text_extractor - markdown
+OCR output by default, PageXML as an alternative)."""
 
 from __future__ import annotations
 
 from collections import Counter
 from pathlib import Path
+from typing import Callable
 
 import pandas as pd
 import torch
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from torchvision.datasets.folder import default_loader
 
-from common import assign_stratified_splits, build_transforms
-from pagexml import extract_text
+from common import assign_stratified_splits, build_transforms, get_text_extractor
 
 
 class MultimodalManifestDataset(Dataset):
@@ -21,19 +22,21 @@ class MultimodalManifestDataset(Dataset):
         rows: pd.DataFrame,
         image_root: Path,
         image_col: str,
-        pagexml_col: str,
+        text_col: str,
         label_col: str,
         transform,
         classes: list[str],
+        text_extractor: Callable[[str], str],
     ):
         self.image_root = Path(image_root)
         self.transform = transform
         self.classes = classes
         self.class_to_idx = {c: i for i, c in enumerate(classes)}
+        self.text_extractor = text_extractor
         self.samples = [
             (
                 str(self.image_root / row[image_col]),
-                str(self.image_root / row[pagexml_col]) if pd.notna(row.get(pagexml_col)) else "",
+                str(self.image_root / row[text_col]) if pd.notna(row.get(text_col)) else "",
                 self.class_to_idx[row[label_col]],
             )
             for _, row in rows.iterrows()
@@ -44,15 +47,15 @@ class MultimodalManifestDataset(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
 
-    def _text_for(self, pagexml_path: str) -> str:
-        if pagexml_path not in self._text_cache:
-            self._text_cache[pagexml_path] = extract_text(pagexml_path) if pagexml_path else ""
-        return self._text_cache[pagexml_path]
+    def _text_for(self, text_path: str) -> str:
+        if text_path not in self._text_cache:
+            self._text_cache[text_path] = self.text_extractor(text_path) if text_path else ""
+        return self._text_cache[text_path]
 
     def __getitem__(self, idx: int):
-        image_path, pagexml_path, label = self.samples[idx]
+        image_path, text_path, label = self.samples[idx]
         image = self.transform(default_loader(image_path))
-        text = self._text_for(pagexml_path)
+        text = self._text_for(text_path)
         return image, text, label
 
 
@@ -76,7 +79,8 @@ def build_multimodal_dataloaders(
     label_col: str,
     tokenizer,
     image_col: str = "image",
-    pagexml_col: str = "pagexml",
+    text_col: str = "pagexml",
+    text_source: str = "markdown",
     split_col: str = "split",
     image_size: int = 224,
     batch_size: int = 16,
@@ -87,9 +91,12 @@ def build_multimodal_dataloaders(
 ) -> tuple[DataLoader, DataLoader | None, DataLoader | None, list[str]]:
     """The multimodal equivalent of common.build_dataloaders_from_manifest -
     same manifest conventions (auto-assigns a stratified split if split_col
-    is missing), plus a pagexml_col for each page's transcription."""
+    is missing), plus a text_col for each page's transcription and
+    text_source ("markdown" or "pagexml" - see common.get_text_extractor)
+    for how to read it."""
     sep = "\t" if str(manifest_path).endswith(".tsv") else ","
     manifest = pd.read_csv(manifest_path, sep=sep)
+    text_extractor = get_text_extractor(text_source)
 
     if split_col not in manifest.columns:
         manifest[split_col] = assign_stratified_splits(manifest[label_col], seed=seed)
@@ -102,8 +109,8 @@ def build_multimodal_dataloaders(
     def make_ds(split: str, train: bool) -> MultimodalManifestDataset:
         rows = manifest[manifest[split_col] == split]
         return MultimodalManifestDataset(
-            rows, image_root, image_col, pagexml_col, label_col,
-            build_transforms(image_size, train=train, augment_strength=augment_strength), classes,
+            rows, image_root, image_col, text_col, label_col,
+            build_transforms(image_size, train=train, augment_strength=augment_strength), classes, text_extractor,
         )
 
     train_ds = make_ds("train", train=True)

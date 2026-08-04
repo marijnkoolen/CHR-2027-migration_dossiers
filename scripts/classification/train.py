@@ -61,7 +61,14 @@ from transformers import AutoConfig, AutoTokenizer
 # package - add it to sys.path so they can be imported by plain name.
 sys.path.insert(0, str(Path(__file__).parent / "lib"))
 
-from common import build_dataloaders_from_manifest, build_transforms, format_confusion_matrix, pick_device
+from common import (
+    build_dataloaders_from_manifest,
+    build_transforms,
+    format_confusion_matrix,
+    get_text_extractor,
+    pick_device,
+    validate_manifest_paths,
+)
 from models import (
     BackboneClassifier,
     MultimodalBackboneClassifier,
@@ -177,6 +184,14 @@ def class_weights_from_samples(samples, num_classes: int) -> torch.Tensor:
     return freq.sum() / (num_classes * freq)
 
 
+def resolve_text_col(args) -> str:
+    """Which manifest column holds the path, for whichever --text-source
+    was chosen - common.get_text_extractor resolves the extractor function
+    itself; this resolves the companion column name (pagexml and markdown
+    OCR output live in separate manifest columns, since a page can have both)."""
+    return args.markdown_col if args.text_source == "markdown" else args.pagexml_col
+
+
 def resolve_amp(args, device: torch.device) -> bool:
     """bf16 autocast, not fp16: on Ampere+ (A10 included) bf16 has the same
     exponent range as fp32, so there's no overflow/GradScaler machinery
@@ -197,7 +212,10 @@ def autocast_context(device: torch.device, enabled: bool):
 
 def _classification_metrics(preds: list[int], targets: list[int], classes: list[str]) -> dict:
     accuracy = sum(p == t for p, t in zip(preds, targets)) / max(1, len(targets))
-    macro_f1 = f1_score(targets, preds, average="macro", zero_division=0)
+    # labels=range(len(classes)): average over the full trained vocabulary,
+    # not just whatever subset of classes happens to appear in this split -
+    # see evaluate_sequence's identical fix for why this matters.
+    macro_f1 = f1_score(targets, preds, average="macro", zero_division=0, labels=list(range(len(classes))))
     report = classification_report(
         targets, preds, labels=list(range(len(classes))), target_names=classes, zero_division=0
     )
@@ -364,6 +382,14 @@ def run_page(args, target_column: str):
     amp = resolve_amp(args, device)
     print(f"device: {device}  amp(bf16): {amp}")
 
+    sep = "\t" if str(args.manifest).endswith(".tsv") else ","
+    validate_manifest_paths(
+        pd.read_csv(args.manifest, sep=sep), args.image_root,
+        image_col=None if args.modality == "text" else args.image_col,
+        text_col=resolve_text_col(args) if args.modality in ("text", "multimodal") else None,
+        allow_missing=args.allow_missing_files,
+    )
+
     if args.modality == "vision":
         train_loader, val_loader, test_loader, classes = build_dataloaders_from_manifest(
             args.manifest, args.image_root, args.image_size, args.batch_size,
@@ -379,7 +405,8 @@ def run_page(args, target_column: str):
         tokenizer = AutoTokenizer.from_pretrained(args.text_backbone)
         train_loader, val_loader, test_loader, classes = build_multimodal_dataloaders(
             args.manifest, args.image_root, target_column, tokenizer,
-            image_col=args.image_col, pagexml_col=args.pagexml_col, split_col=args.split_col,
+            image_col=args.image_col, text_col=resolve_text_col(args), text_source=args.text_source,
+            split_col=args.split_col,
             image_size=args.image_size, batch_size=args.batch_size, max_text_length=args.max_text_length,
             augment_strength=args.augment_strength, seed=args.seed,
         )
@@ -394,7 +421,7 @@ def run_page(args, target_column: str):
         tokenizer = AutoTokenizer.from_pretrained(args.text_backbone)
         train_loader, val_loader, test_loader, classes = build_text_dataloaders(
             args.manifest, args.image_root, target_column, tokenizer,
-            pagexml_col=args.pagexml_col, split_col=args.split_col,
+            text_col=resolve_text_col(args), text_source=args.text_source, split_col=args.split_col,
             batch_size=args.batch_size, max_text_length=args.max_text_length, seed=args.seed,
         )
         model = TextBackboneClassifier(
@@ -501,6 +528,7 @@ def evaluate_sequence(embedder, seq_model, loader: DataLoader, device,
     start_true, start_pred = [], []
     task_true = {"doctype": [], "layout": [], "functional": []}
     task_pred = {"doctype": [], "layout": [], "functional": []}
+    n_classes: dict[str, int] = {}
 
     for batch in loader:
         with autocast_context(device, amp):
@@ -518,6 +546,7 @@ def evaluate_sequence(embedder, seq_model, loader: DataLoader, device,
             keep = target != IGNORE_INDEX
             task_true[key].append(target[keep])
             task_pred[key].append(preds[keep])
+            n_classes[key] = out[f"{key}_logits"].shape[-1]
 
     start_true_cat = torch.cat(start_true).numpy()
     start_pred_cat = torch.cat(start_pred).numpy()
@@ -539,7 +568,19 @@ def evaluate_sequence(embedder, seq_model, loader: DataLoader, device,
             metrics[f"{key}_macro_f1"] = float("nan")
             continue
         metrics[f"{key}_accuracy"] = (true_cat == pred_cat).float().mean().item()
-        metrics[f"{key}_macro_f1"] = f1_score(true_cat.numpy(), pred_cat.numpy(), average="macro", zero_division=0)
+        # labels=range(n_classes): average over every class in the trained
+        # vocabulary, not just whichever ones happen to appear in this
+        # split - matching classification_report below, which already does
+        # this. Without it, sklearn's default (average only over labels
+        # observed in y_true/y_pred) silently drops classes with zero test
+        # examples from the average instead of counting them as 0 - which
+        # inflates the score and, for a vocabulary built specifically to
+        # collapse rare classes into "Other" buckets, is exactly backwards:
+        # those are the classes most likely to have zero test support on a
+        # small split, and most in need of being visible in the number.
+        metrics[f"{key}_macro_f1"] = f1_score(
+            true_cat.numpy(), pred_cat.numpy(), average="macro", zero_division=0, labels=list(range(n_classes[key]))
+        )
         if classes is not None and key in classes:
             metrics[f"{key}_report"] = classification_report(
                 true_cat.numpy(), pred_cat.numpy(), labels=list(range(len(classes[key]))),
@@ -786,6 +827,12 @@ def run_sequence(args, targets: list[str]):
     print(f"device: {device}  amp(bf16): {amp}")
 
     manifest = pd.read_csv(args.manifest, sep="\t" if str(args.manifest).endswith(".tsv") else ",")
+    validate_manifest_paths(
+        manifest, args.image_root,
+        image_col=None if args.modality == "text" else args.image_col,
+        text_col=resolve_text_col(args) if args.modality in ("text", "multimodal") else None,
+        allow_missing=args.allow_missing_files,
+    )
 
     if args.recompose_passes > 0:
         synthetic = recompose_documents(
@@ -807,6 +854,8 @@ def run_sequence(args, targets: list[str]):
     text_only = args.modality == "text"
     tokenizer = AutoTokenizer.from_pretrained(args.text_backbone) if (multimodal or text_only) else None
 
+    text_extractor = get_text_extractor(args.text_source) if (multimodal or text_only) else None
+
     def make_dataset(split: str, train: bool) -> PageSequenceDataset:
         return PageSequenceDataset(
             manifest, split, args.image_root,
@@ -815,7 +864,8 @@ def run_sequence(args, targets: list[str]):
             pdf_col=args.pdf_col, page_col=args.page_col, image_col=None if text_only else args.image_col,
             doctype_col=args.doctype_col, layout_col=args.layout_col, functional_col=args.functional_col,
             start_col=args.start_col, split_col=args.split_col,
-            pagexml_col=args.pagexml_col if (multimodal or text_only) else None,
+            text_col=resolve_text_col(args) if (multimodal or text_only) else None,
+            text_extractor=text_extractor,
         )
 
     train_ds = make_dataset("train", train=True)
@@ -1164,7 +1214,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pdf-col", default="pdf_name")
     parser.add_argument("--page-col", default="page_num")
     parser.add_argument("--image-col", default="img_path")
+    parser.add_argument("--text-source", choices=["pagexml", "markdown"], default="markdown",
+                         help="markdown (default): Qwen2.5-VL markdown-mode OCR output, stripped of markup - see "
+                              "lib/markdown_text.py for why. pagexml: PageXML transcriptions, this project's "
+                              "original text source.")
     parser.add_argument("--pagexml-col", default="text_path")
+    parser.add_argument("--markdown-col", default="markdown_path", help="only used with --text-source markdown")
+    parser.add_argument("--allow-missing-files", action="store_true",
+                         help="don't error on manifest paths that don't resolve to an existing file - see "
+                              "common.validate_manifest_paths. Off by default: a systematic path mistake here "
+                              "silently produces near-identical embeddings/predictions for every page, not an "
+                              "error, unless caught up front. No effect with --cached-embeddings (no raw files "
+                              "are read there at all).")
     parser.add_argument("--doctype-col", default="document_type")
     parser.add_argument("--layout-col", default="layout_type")
     parser.add_argument("--functional-col", default="functional_category")

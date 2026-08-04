@@ -39,16 +39,24 @@ Usage:
         --manifest <your real page-level manifest> --image-root <root> \\
         --out-dir data/embeddings --image-backbone facebook/dinov2-small
 
-    # or, to reproduce the multimodal run that showed the collapse:
+    # or, to reproduce the multimodal run that showed the collapse (--text-source
+    # defaults to markdown - add --text-source pagexml --pagexml-col <col> for the
+    # original PageXML source instead):
     python scripts/classification/precompute_embeddings.py \\
         --manifest <manifest> --image-root <root> --out-dir data/embeddings_multimodal \\
         --image-backbone facebook/dinov2-small --modality multimodal \\
-        --text-backbone bert-base-uncased --pagexml-col <col>
+        --text-backbone bert-base-uncased --markdown-col <col>
 
     # or, text-only (no --image-backbone/--image-size involved at all):
     python scripts/classification/precompute_embeddings.py \\
         --manifest <manifest> --image-root <root> --out-dir data/embeddings_text \\
-        --modality text --text-backbone bert-base-uncased --pagexml-col <col>
+        --modality text --text-backbone bert-base-uncased --markdown-col <col>
+
+    # or, PageXML instead of the markdown default:
+    python scripts/classification/precompute_embeddings.py \\
+        --manifest <manifest> --image-root <root> --out-dir data/embeddings_text_pagexml \\
+        --modality text --text-backbone bert-base-uncased \\
+        --text-source pagexml --pagexml-col <col>
 
 Writes:
     <out-dir>/embeddings.npy            (N_pages, D) float32
@@ -70,9 +78,8 @@ from torchvision.datasets.folder import default_loader
 
 sys.path.insert(0, str(Path(__file__).parent / "lib"))
 
-from common import build_transforms, pick_device
+from common import build_transforms, get_text_extractor, pick_device, validate_manifest_paths
 from models import MultimodalPageEmbedder, PageEmbedder, TextEmbedder
-from pagexml import extract_text
 
 
 def build_pdf_id_mapping(pdf_values: pd.Series) -> dict:
@@ -85,11 +92,20 @@ def build_pdf_id_mapping(pdf_values: pd.Series) -> dict:
     return {real: f"pdf_{i:05d}" for i, real in enumerate(unique_ids)}
 
 
+def resolve_text_col(args) -> str:
+    """Which manifest column holds the path, for whichever --text-source
+    was chosen - common.get_text_extractor resolves the extractor function
+    itself; this resolves the companion column name (pagexml and markdown
+    OCR output live in separate manifest columns, since a page can have both)."""
+    return args.markdown_col if args.text_source == "markdown" else args.pagexml_col
+
+
 def embed_rows(rows: pd.DataFrame, transform, embedder, args, device: torch.device,
                 image_root: Path, label: str) -> np.ndarray:
     n = len(rows)
     embeddings = np.zeros((n, embedder.embed_dim), dtype=np.float32)
     n_empty_text, n_total_text = 0, 0
+    extract_text, text_col = get_text_extractor(args.text_source), resolve_text_col(args)
     with torch.no_grad():
         for start in range(0, n, args.batch_size):
             batch = rows.iloc[start : start + args.batch_size]
@@ -97,7 +113,7 @@ def embed_rows(rows: pd.DataFrame, transform, embedder, args, device: torch.devi
             if args.modality == "text":
                 # no image ever touched - the whole point of this modality
                 texts = [
-                    extract_text(str(image_root / p)) if pd.notna(p) else "" for p in batch[args.pagexml_col]
+                    extract_text(str(image_root / p)) if pd.notna(p) else "" for p in batch[text_col]
                 ]
                 n_empty_text += sum(1 for t in texts if not t.strip())
                 n_total_text += len(texts)
@@ -113,7 +129,7 @@ def embed_rows(rows: pd.DataFrame, transform, embedder, args, device: torch.devi
                     out = embedder(images)
                 else:
                     texts = [
-                        extract_text(str(image_root / p)) if pd.notna(p) else "" for p in batch[args.pagexml_col]
+                        extract_text(str(image_root / p)) if pd.notna(p) else "" for p in batch[text_col]
                     ]
                     n_empty_text += sum(1 for t in texts if not t.strip())
                     n_total_text += len(texts)
@@ -127,20 +143,25 @@ def embed_rows(rows: pd.DataFrame, transform, embedder, args, device: torch.devi
                 print(f"  [{label}] {start + len(batch)}/{n}")
 
     # An empty string tokenizes to the same [CLS][SEP]-only input every
-    # time, so if PageXML paths are silently failing to resolve/parse
-    # (wrong --pagexml-col, wrong --image-root, or a tag-name mismatch in
-    # pagexml.py's assumptions about the PAGE-XML schema in use),
-    # extract_text()'s "return '' rather than raise" fallback (by design,
-    # so pages that legitimately have no transcription - e.g. photos -
-    # don't break the run) quietly produces near-identical embeddings for
-    # every page instead of an error. A handful of legitimately blank pages
-    # is normal; most/all of them being blank is not.
+    # time, so if the text source's paths are silently failing to
+    # resolve/parse (wrong --pagexml-col/--markdown-col/--image-root, or -
+    # for pagexml specifically - a tag-name mismatch in pagexml.py's
+    # assumptions about the PAGE-XML schema in use), extract_text()'s
+    # "return '' rather than raise" fallback (by design, so pages that
+    # legitimately have no transcription - e.g. photos - don't break the
+    # run) quietly produces near-identical embeddings for every page
+    # instead of an error. A handful of legitimately blank pages is normal;
+    # most/all of them being blank is not.
     if n_total_text > 0:
         empty_frac = n_empty_text / n_total_text
         if empty_frac > 0.5:
+            col_hint = "--markdown-col" if args.text_source == "markdown" else "--pagexml-col"
+            schema_hint = (
+                "" if args.text_source == "markdown" else
+                " and that pagexml.py's tag-name assumptions (TextLine/TextEquiv/Unicode) match your PAGE-XML schema"
+            )
             print(f"  WARNING [{label}]: {n_empty_text}/{n_total_text} ({empty_frac:.0%}) pages produced empty "
-                  f"text - check --pagexml-col/--image-root are correct and that pagexml.py's tag-name "
-                  f"assumptions (TextLine/TextEquiv/Unicode) match your PAGE-XML schema. Embeddings from mostly-"
+                  f"text - check {col_hint}/--image-root are correct{schema_hint}. Embeddings from mostly-"
                   f"empty text will be near-identical regardless of each page's real content.")
     return embeddings
 
@@ -159,7 +180,14 @@ def main():
     parser.add_argument("--pdf-col", default="pdf_name")
     parser.add_argument("--page-col", default="page_num")
     parser.add_argument("--image-col", default="img_path")
+    parser.add_argument("--text-source", choices=["pagexml", "markdown"], default="markdown",
+                         help="markdown (default): Qwen2.5-VL markdown-mode OCR output, stripped of markdown "
+                              "markup (lib/markdown_text.py) - see that module's docstring for why markup is "
+                              "stripped, and why this is the default. pagexml: PageXML transcriptions "
+                              "(lib/pagexml.py), this project's original text source.")
     parser.add_argument("--pagexml-col", default="text_path")
+    parser.add_argument("--markdown-col", default="markdown_path",
+                         help="only used with --text-source markdown")
     parser.add_argument("--doctype-col", default="document_type")
     parser.add_argument("--layout-col", default="layout_type")
     parser.add_argument("--functional-col", default="functional_category")
@@ -169,6 +197,11 @@ def main():
                          help="also embed N randomly-augmented copies of each split=='train' PDF, each as its "
                               "own virtual PDF (pdf_id suffixed _augK) - see module docstring. 0 = off (default).")
     parser.add_argument("--augment-strength", choices=["moderate", "strong"], default="moderate")
+    parser.add_argument("--allow-missing-files", action="store_true",
+                         help="don't error on manifest paths that don't resolve to an existing file - see "
+                              "common.validate_manifest_paths. Off by default: a systematic path mistake here "
+                              "silently produces near-identical embeddings for every page, not an error, unless "
+                              "caught up front.")
     parser.add_argument("--device", default=None)
     args = parser.parse_args()
 
@@ -189,6 +222,13 @@ def main():
     manifest = pd.read_csv(args.manifest, sep=sep)
     n = len(manifest)
     print(f"{n} pages, {manifest[args.pdf_col].nunique()} PDFs")
+
+    validate_manifest_paths(
+        manifest, args.image_root,
+        image_col=None if args.modality == "text" else args.image_col,
+        text_col=resolve_text_col(args) if args.modality in ("text", "multimodal") else None,
+        allow_missing=args.allow_missing_files,
+    )
 
     if args.modality == "vision":
         embedder = PageEmbedder(args.image_backbone, unfreeze_last_n_blocks=0, device=device).to(device)

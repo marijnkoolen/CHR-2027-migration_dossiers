@@ -8,9 +8,10 @@ columns that file doesn't have yet: an actual per-page image file path, and
 a split column assigned per PDF (not per page - pages from the same PDF must
 stay in the same split, or document-boundary detection can't be evaluated).
 
-Passing `pagexml_col` also loads each page's transcribed text (same PageXML
-reader used by train_multimodal.py), for the sequence-context model's
-multimodal mode - see train_sequence.py.
+Passing `text_col` also loads each page's transcribed text (see
+common.get_text_extractor - markdown OCR output by default, PageXML as an
+alternative), for the sequence-context model's multimodal mode - see
+train.py.
 """
 
 from __future__ import annotations
@@ -18,13 +19,12 @@ from __future__ import annotations
 import math
 import random
 from pathlib import Path
+from typing import Callable
 
 import pandas as pd
 import torch
 from torch.utils.data import Dataset, Sampler
 from torchvision.datasets.folder import default_loader
-
-from pagexml import extract_text
 
 IGNORE_INDEX = -100
 
@@ -65,12 +65,14 @@ class PageSequenceDataset(Dataset):
         functional_col: str = "Functional Categories",
         start_col: str = "Start page",
         split_col: str = "split",
-        pagexml_col: str | None = None,
+        text_col: str | None = None,
+        text_extractor: Callable[[str], str] | None = None,
     ):
         self.image_root = Path(image_root)
         self.transform = transform
         self.image_col = image_col
-        self.pagexml_col = pagexml_col
+        self.text_col = text_col
+        self.text_extractor = text_extractor
         self.start_col = start_col
         self.doctype_col = doctype_col
         self.layout_col = layout_col
@@ -98,12 +100,12 @@ class PageSequenceDataset(Dataset):
         sampler needs to decide how many PDFs it can fit in a batch."""
         return [len(group) for group in self.pdfs]
 
-    def _text_for(self, pagexml_path: str) -> str:
-        if not pagexml_path:
+    def _text_for(self, text_path: str) -> str:
+        if not text_path:
             return ""
-        if pagexml_path not in self._text_cache:
-            self._text_cache[pagexml_path] = extract_text(pagexml_path)
-        return self._text_cache[pagexml_path]
+        if text_path not in self._text_cache:
+            self._text_cache[text_path] = self.text_extractor(text_path)
+        return self._text_cache[text_path]
 
     def __getitem__(self, idx: int):
         group = self.pdfs[idx]
@@ -113,10 +115,10 @@ class PageSequenceDataset(Dataset):
         else:
             images = None
 
-        if self.pagexml_col:
+        if self.text_col:
             texts = [
                 self._text_for(str(self.image_root / p)) if pd.notna(p) else ""
-                for p in group[self.pagexml_col]
+                for p in group[self.text_col]
             ]
         else:
             texts = [""] * len(group)
