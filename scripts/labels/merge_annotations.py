@@ -187,6 +187,34 @@ def merge(long_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
 
     if 'pdf_name' not in merged_df.columns and IMAGE_COL in merged_df.columns:
         merged_df = merged_df.rename(columns={IMAGE_COL: 'pdf_name'})
+
+    # Simplify column names
+    column_map = {
+        'dossier_name': 'pdf_name',
+        'page number': 'page_num',
+        'Document type': 'document_type',
+        'Document type_agreement': 'document_type_agreement',
+        'Layout Type Classification': 'layout_type',
+        'Layout Type Classification_agreement': 'layout_type_agreement',
+        'Functional Categories': 'functional_category',
+        'Functional Categories_agreement': 'functional_category_agreement',
+        'Start page': 'start_page',
+        'Start page_agreement': 'start_page_agreement',
+    }
+    merged_df = merged_df.rename(columns=column_map)
+    print(f"\n\n---------------------\n")
+    print(f"MERGED MAPPED COLUMNS:\n{merged_df.columns}")
+    print(f"\n\n---------------------\n")
+
+    # map layout other to most appropriate
+    def map_layout(row):
+        if row['layout_type'] == 'Other' and row['document_type'].startswith('Letter'):
+            return 'Letter'
+        if row['layout_type'] == 'Other' and row['document_type'].startswith('Testimonial'):
+            return 'Letter'
+    merged_df.apply(map_layout, axis=1)
+
+    # track disagreements
     disagreement_df = pd.DataFrame(disagreement_rows)
     return merged_df, disagreement_df
 
@@ -201,19 +229,6 @@ def text_path(dossier: str, page_num: int) -> Path:
 
 
 def add_splits(merged_df: pd.DataFrame, random_seed: int = 8963764) -> pd.DataFrame:
-    column_map = {
-        'dossier_name': 'pdf_name',
-        'page number': 'page_num',
-        'Document type': 'document_type',
-        'Document type_agreement': 'document_type_agreement',
-        'Layout Type Classification': 'layout_type',
-        'Layout Type Classification_agreement': 'layout_type_agreement',
-        'Functional Categories': 'functional_category',
-        'Functional Categories_agreement': 'functional_category_agreement',
-        'Start page': 'start_page',
-        'Start page_agreement': 'start_page_agreement',
-    }
-    merged_df = merged_df.rename(columns=column_map)
     merged_df['pdf_id'] = merged_df.pdf_name.apply(lambda x: x.replace('.pdf', ''))
 
     merged_df['img_path'] = merged_df.apply(lambda row: img_path(row['pdf_id'], row['page_num']), axis=1)
@@ -253,7 +268,9 @@ def main():
             print(f"  - {entry['annotator']}: {entry['label']!r}")
         print()
 
+    print(f"BUILDING LONG TABLE")
     long_df = build_long_table(dfs)
+    print(f"MERGING")
     merged_df, disagreement_df = merge(long_df)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
